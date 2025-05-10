@@ -116,6 +116,7 @@ class OccupancyGrid:
         # add value to the points
         self.occupancy_map[points[0], points[1]] += val
 
+
     def add_map_points(self, points_x, points_y, val):
         """
         Add a value to an array of points, input coordinates in meters
