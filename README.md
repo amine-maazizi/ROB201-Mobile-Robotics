@@ -1,19 +1,19 @@
-# Welcome to *ensta-rob201*
+# ROB201-Mobile-Robotics Repository
 
-This git repository *ensta-rob201* is the starting point for your work during the ROB201 project/course. The online, up-to-date version of this code is available at: [GitHub repository *ensta-rob201*](https://github.com/emmanuel-battesti/ensta-rob201)
+This repository, *ROB201-Mobile-Robotics*, contains my work for the ROB201 course at ENSTA Paris, an introduction to mobile robotics. The course covers core algorithms for mapping, localization, and planning using a Lidar sensor. It includes an in-depth study of the tinySLAM algorithm applied to Lidar data. The up-to-date version of this code is available at: [GitHub repository *ROB201-Mobile-Robotics*](https .com/emmanuel-battesti/ensta-rob201).
 
-To start working on your ROB201 project, you will have to install this repository (which will install required dependencies). The [INSTALL.md](INSTALL.md) file contains installation tips for Ubuntu and Windows. The code will work also on MacOS, with minimal adaptation of the Ubuntu installation instructions.
+## Setup
 
-# Place-Bot
+To use this repository, clone it to install the code and dependencies. The [INSTALL.md](INSTALL.md) file provides instructions for Ubuntu and Windows. For macOS, follow the Ubuntu instructions with minor adjustments.
 
-*ensta-rob201* use the **Place-Bot** simulator: [**Place-Bot** GitHub repository](https://github.com/emmanuel-battesti/place-bot). It will be installed automatically with the above procedure, but it is strongly recommended to read the [*Place-Bot* documentation](https://github.com/emmanuel-battesti/place-bot#readme).
+## Place-Bot Simulator
 
+The project uses the **Place-Bot** simulator, which is installed automatically. See the [**Place-Bot** GitHub repository](https://github.com/emmanuel-battesti/place-bot) and its [documentation](https://github.com/emmanuel-battesti/place-bot#readme) for details on its functionality.
 
-# Submission
+## Submission
 
-At the end of the course, you will have to submit your solution to your teacher in a zip file containing this complete repository. 
+At the end of the course, the complete repository will be submitted as a zip file to the instructor.
 
-# Contact
+## Contact
 
-If you have questions about the code, in particular the use of *Place-Bot* you can contact: emmanuel . battesti at ensta-paris . fr
-
+For questions about the code or *Place-Bot*, contact the instructor at: emmanuel.battesti@ensta-paris.fr.
