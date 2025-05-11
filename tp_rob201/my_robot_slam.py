@@ -16,7 +16,6 @@ from occupancy_grid import OccupancyGrid
 from planner import Planner
 
 
-# Definition of our robot controller
 class MyRobotSlam(RobotAbstract):
     """A robot controller including SLAM, path planning and path following"""
 
@@ -28,12 +27,10 @@ class MyRobotSlam(RobotAbstract):
                          lidar_params=lidar_params,
                          odometer_params=odometer_params)
 
-        # step counter to deal with init and display
+        # Step counter to deal with init and display
         self.counter = 0
 
         # Init SLAM object
-        # Here we cheat to get an occupancy grid size that's not too large, by using the
-        # robot's starting position and the maximum map size that we shouldn't know.
         size_area = (1400, 1000)
         robot_position = (439.0, 195)
         self.occupancy_grid = OccupancyGrid(x_min=-(size_area[0] / 2 + robot_position[0]),
@@ -45,7 +42,7 @@ class MyRobotSlam(RobotAbstract):
         self.tiny_slam = TinySlam(self.occupancy_grid)
         self.planner = Planner(self.occupancy_grid)
 
-        # storage for pose after localization
+        # Storage for pose after localization
         self.corrected_pose = np.array([0, 0, 0])
 
         # TP1
@@ -60,11 +57,20 @@ class MyRobotSlam(RobotAbstract):
         self.iteration = 0
         self.score_threshold = 7000
 
+        # TP5
+        self.path = []
+        self.path_index = 0
+        self.exploration_iterations = 1000  # Number of iterations for exploration
+        self.path_following = False  # Track whether in path-following mode
+
         # Debug window
         self.debug_window = DebugWindow()
         self.last_command = {"forward": 0.0, "rotation": 0.0}
 
     def select_new_goal(self):
+        """
+        Select a new goal for exploration, only called during exploration phase
+        """
         lidar = self.lidar()
         laser_dist = lidar.get_sensor_values()
         ray_angles = lidar.get_ray_angles()
@@ -88,48 +94,108 @@ class MyRobotSlam(RobotAbstract):
         goal_x = world_pose[0] + goal_dist * np.cos(ray_angle + world_pose[2])
         goal_y = world_pose[1] + goal_dist * np.sin(ray_angle + world_pose[2])
         
-        return np.array([goal_x, goal_y]) - self.robot_position
+        new_goal = np.array([goal_x, goal_y]) - self.robot_position
+        self.debug_window.add_status_message(
+            f"New goal set to: ({new_goal[0]:.1f}, {new_goal[1]:.1f})",
+            self.debug_window.success_color
+        )
+        return new_goal
+
+    def plan_path(self, start_pose, goal_pose, corrected_pose):
+        """
+        Plan a path from start_pose to goal_pose using the planner and visualize it
+        start_pose: [x, y, theta] in world coordinates
+        goal_pose: [x, y, theta] in world coordinates
+        corrected_pose: [x, y, theta] in odometry frame for visualization
+        Returns: bool, True if path is planned successfully, False otherwise
+        """
+        self.path = self.planner.plan(start_pose, goal_pose)
+        self.path_index = 0
+        if self.path:
+            traj = np.array([[p[0] for p in self.path], [p[1] for p in self.path]])
+            self.tiny_slam.grid.display_cv(corrected_pose, goal=goal_pose[:2], traj=traj)
+            self.debug_window.add_status_message(
+                f"Path planned to origin: {len(self.path)} waypoints",
+                self.debug_window.success_color
+            )
+            return True
+        else:
+            self.debug_window.add_status_message(
+                "No path found to origin, stopping",
+                self.debug_window.error_color
+            )
+            self.path_following = False
+            return False
+
+    def path_following_control(self, world_pose, corrected_pose):
+        """
+        Control function for path following, tracks waypoints in self.path
+        Returns: command dictionary {"forward": float, "rotation": float}
+        """
+        if not self.path or self.path_index >= len(self.path):
+            self.debug_window.add_status_message(
+                "No valid path or path completed, stopping",
+                self.debug_window.error_color
+            )
+            return {"forward": 0, "rotation": 0}
+
+        next_waypoint = self.path[self.path_index]
+        dist_to_waypoint = np.linalg.norm(world_pose[:2] - next_waypoint[:2])
+        
+        if dist_to_waypoint < 20:  # Waypoint reached
+            self.path_index += 1
+            if self.path_index < len(self.path):
+                self.debug_window.add_status_message(
+                    f"Reached waypoint {self.path_index}/{len(self.path)}",
+                    self.debug_window.success_color
+                )
+            else:
+                self.debug_window.add_status_message(
+                    "Reached origin, stopping",
+                    self.debug_window.success_color
+                )
+                return {"forward": 0, "rotation": 0}
+
+        # Convert waypoint to odometry frame
+        goal_in_odom = next_waypoint[:2] - self.robot_position
+        command = potential_field_control(
+            self.lidar(),
+            corrected_pose,
+            np.array([goal_in_odom[0], goal_in_odom[1], corrected_pose[2]])
+        )
+        self.debug_window.add_status_message(
+            f"Following waypoint {self.path_index}: ({next_waypoint[0]:.1f}, {next_waypoint[1]:.1f}), dist: {dist_to_waypoint:.1f}",
+            self.debug_window.info_color
+        )
+        return command
 
     def control(self):
         """
         Main control function executed at each time step
         """
-
-        return self.control_tp4()
+        return self.control_tp5()
 
     def control_tp1(self):
         """
         Control function for TP1
-        Control funtion with minimal random motion
+        Control function with minimal random motion
         """
-
-        # Compute new command speed to perform obstacle avoidance
         _, _, theta = self.odometer_values()
         command, self.is_rotating = reactive_obst_avoid(self.lidar(), theta, self.target_angle, self.is_rotating)
-
         return command
 
     def control_tp2(self):
         """
         Control function for TP2
-        Main control function with full SLAM, exploration using lidar data and path planning
+        Main control function with exploration using lidar data
         """
-        pose = self.odometer_values()  
-
+        pose = self.odometer_values()
         world_pose = np.array([self.robot_position[0] + pose[0], self.robot_position[1] + pose[1], pose[2]])
-        goal_in_odom = self.goal + pose[:2] - world_pose[:2] 
-
-        dist = np.linalg.norm(self.goal - world_pose[:2])  
-        if dist <= 10:
-            if self.iteration >= 25:
-                new_goal = self.select_new_goal()
-                self.goal = new_goal
-                self.debug_window.add_status_message(
-                    f"New goal set to: ({new_goal[0]:.1f}, {new_goal[1]:.1f})",
-                    self.debug_window.success_color
-                )
+        goal_in_odom = self.goal + pose[:2] - world_pose[:2]
+        dist = np.linalg.norm(self.goal - world_pose[:2])
+        if dist <= 10 and self.iteration >= 25 and not self.path_following:
+            self.goal = self.select_new_goal()
             goal_in_odom = self.goal
-         
         self.iteration += 1
         command = potential_field_control(self.lidar(), pose, np.append(goal_in_odom, pose[2]))
         return command
@@ -138,17 +204,49 @@ class MyRobotSlam(RobotAbstract):
         pose = self.odometer_values()
         self.tiny_slam.update_map(self.lidar(), pose)
         self.tiny_slam.grid.display_cv(pose)
-
         return self.control_tp2()
-    
+
     def control_tp4(self):
         """
-        Control function for TP4 with SLAM 
+        Control function for TP4 with SLAM
         """
         raw_odom = self.odometer_values()
-        
         score = self.tiny_slam.localise(self.lidar(), raw_odom)
-        
+        corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
+        if score > self.score_threshold:
+            old_position = self.robot_position.copy()
+            self.robot_position = corrected_pose[:2]
+            self.debug_window.add_status_message(
+                f"Position updated: ({old_position[0]:.1f}, {old_position[1]:.1f}) → ({self.robot_position[0]:.1f}, {self.robot_position[1]:.1f})",
+                self.debug_window.warning_color
+            )
+        self.tiny_slam.update_map(self.lidar(), corrected_pose)
+        command = self.control_tp2()
+        self.last_command = command
+        world_pose = np.array([
+            self.robot_position[0] + corrected_pose[0],
+            self.robot_position[1] + corrected_pose[1]
+        ])
+        self.debug_window.update(
+            position=world_pose,
+            goal=self.goal,
+            speed=command["forward"],
+            rotation=command["rotation"],
+            slam_score=score,
+            iteration=self.iteration,
+            max_range=self.lidar().max_range,
+            mode="Exploring" if self.iteration < self.exploration_iterations else "Path Following"
+        )
+        self.debug_window.render()
+        return command
+
+    def control_tp5(self):
+        """
+        Control function for TP5 with SLAM, path planning, and path following
+        """
+        # SLAM update
+        raw_odom = self.odometer_values()
+        score = self.tiny_slam.localise(self.lidar(), raw_odom)
         corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
 
         if score > self.score_threshold:
@@ -158,30 +256,55 @@ class MyRobotSlam(RobotAbstract):
                 f"Position updated: ({old_position[0]:.1f}, {old_position[1]:.1f}) → ({self.robot_position[0]:.1f}, {self.robot_position[1]:.1f})",
                 self.debug_window.warning_color
             )
-      
+
         self.tiny_slam.update_map(self.lidar(), corrected_pose)
-        # self.tiny_slam.grid.display_cv(corrected_pose)
-        
-        # Get command and store it for debug window
-        command = self.control_tp2()
-        self.last_command = command
-        
-        # Calculate world position for debug window
         world_pose = np.array([
             self.robot_position[0] + corrected_pose[0],
-            self.robot_position[1] + corrected_pose[1]
+            self.robot_position[1] + corrected_pose[1],
+            corrected_pose[2]
         ])
-        
-        # Update and render debug window with explicit values
+
+        self.iteration += 1
+
+        # Exploration phase
+        if self.iteration <= self.exploration_iterations:
+            command = self.control_tp2()
+            self.path_following = False
+        else:
+            self.path_following = True
+            # Plan path to origin at the end of exploration
+            if self.iteration == self.exploration_iterations + 1:
+                goal = np.array([0, 0, 0])
+                if not self.plan_path(world_pose, goal, corrected_pose):
+                    command = {"forward": 0, "rotation": 0}
+                    self.last_command = command
+                    self.debug_window.update(
+                        position=world_pose[:2],
+                        goal=np.array([0, 0]),
+                        speed=command["forward"],
+                        rotation=command["rotation"],
+                        slam_score=score,
+                        iteration=self.iteration,
+                        max_range=self.lidar().max_range,
+                        mode="Path Following"
+                    )
+                    self.debug_window.render()
+                    return command
+
+            # Path following phase
+            command = self.path_following_control(world_pose, corrected_pose)
+
+        self.last_command = command
         self.debug_window.update(
-            position=world_pose,
-            goal=self.goal,
+            position=world_pose[:2],
+            goal=self.goal if not self.path_following else (self.path[self.path_index][:2] if self.path and self.path_index < len(self.path) else np.array([0, 0])),
             speed=command["forward"],
             rotation=command["rotation"],
             slam_score=score,
             iteration=self.iteration,
-            max_range=self.lidar().max_range
+            max_range=self.lidar().max_range,
+            mode="Exploring" if not self.path_following else "Path Following"
         )
         self.debug_window.render()
-        
-        return command  
+
+        return command

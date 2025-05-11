@@ -66,6 +66,9 @@ class DebugWindow:
         # Iteration Count
         self.create_label("Iteration Count", "iteration", "0")
         
+        # Robot Mode
+        self.create_label("Robot Mode", "mode", "Exploring")
+        
         # Status bar
         self.status_frame = ttk.Frame(self.main_frame, style="Custom.TFrame")
         self.status_frame.grid(row=len(self.labels), column=0, sticky=(tk.W, tk.E), pady=(10, 0))
@@ -95,6 +98,7 @@ class DebugWindow:
         self.iteration = 0
         self.score_threshold = 7000
         self.max_range = 1000  # Default value, will be updated
+        self.mode = "Exploring"  # Default mode
         
     def create_label(self, title, key, initial_value):
         """Helper method to create a label with title and value"""
@@ -152,7 +156,7 @@ class DebugWindow:
                 self.message_start_time = None
                 self.status_label.config(text="Ready", foreground=self.info_color)
         
-    def update(self, position, goal, speed, rotation, slam_score, iteration, max_range=None):
+    def update(self, position, goal, speed, rotation, slam_score, iteration, max_range=None, mode=None):
         """Update the values displayed in the window with explicit parameters"""
         try:
             # Store state
@@ -164,6 +168,8 @@ class DebugWindow:
             self.iteration = iteration
             if max_range is not None:
                 self.max_range = max_range
+            if mode is not None:
+                self.mode = mode
             
             # Update position
             self.labels["position"].config(
@@ -196,6 +202,13 @@ class DebugWindow:
             
             # Update iteration count
             self.labels["iteration"].config(text=str(iteration))
+            
+            # Update robot mode
+            mode_color = self.success_color if self.mode == "Path Following" else self.info_color
+            self.labels["mode"].config(
+                text=self.mode,
+                foreground=mode_color
+            )
             
             # Update status messages
             self.update_status()
