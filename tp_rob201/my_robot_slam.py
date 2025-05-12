@@ -51,7 +51,8 @@ class MyRobotSlam(RobotAbstract):
 
         # TP2
         self.robot_position = np.array(robot_position)
-        self.goal = np.array([0, 0])
+        self.goal = np.array([-500, -250])
+        self.theta_Oref = 0
 
         # TP4
         self.iteration = 0
@@ -60,17 +61,34 @@ class MyRobotSlam(RobotAbstract):
         # TP5
         self.path = []
         self.path_index = 0
-        self.exploration_iterations = 1000  # Number of iterations for exploration
-        self.path_following = False  # Track whether in path-following mode
+        self.exploration_iterations = 1000
+        self.path_following = False 
 
         # Debug window
         self.debug_window = DebugWindow()
         self.last_command = {"forward": 0.0, "rotation": 0.0}
 
+    def transform_odom_to_world(self, odom_pose):
+        """Transform a pose from odometry frame to world frame."""
+        x_0, y_0, theta_0 = odom_pose
+        x_Oref, y_Oref = self.robot_position
+        theta_Oref = getattr(self, 'theta_Oref', 0)  # Default to 0 if not set
+        x = x_Oref + x_0 * np.cos(theta_Oref) - y_0 * np.sin(theta_Oref)
+        y = y_Oref + x_0 * np.sin(theta_Oref) + y_0 * np.cos(theta_Oref)
+        theta = theta_0 + theta_Oref
+        return np.array([x, y, theta])
+
+    def transform_world_to_odom(self, world_pose):
+        """Transform a pose from world frame to odometry frame."""
+        x, y, theta = world_pose
+        x_Oref, y_Oref = self.robot_position
+        theta_Oref = getattr(self, 'theta_Oref', 0)
+        x_0 = (x - x_Oref) * np.cos(theta_Oref) + (y - y_Oref) * np.sin(theta_Oref)
+        y_0 = -(x - x_Oref) * np.sin(theta_Oref) + (y - y_Oref) * np.cos(theta_Oref)
+        theta_0 = theta - theta_Oref
+        return np.array([x_0, y_0, theta_0])
+
     def select_new_goal(self):
-        """
-        Select a new goal for exploration, only called during exploration phase
-        """
         lidar = self.lidar()
         laser_dist = lidar.get_sensor_values()
         ray_angles = lidar.get_ray_angles()
@@ -89,12 +107,14 @@ class MyRobotSlam(RobotAbstract):
         
         ray_angle = ray_angles[goal_ray]
         pose = self.odometer_values()
-        world_pose = np.array([self.robot_position[0] + pose[0], self.robot_position[1] + pose[1], pose[2]])
+        world_pose = self.transform_odom_to_world(pose)
         
         goal_x = world_pose[0] + goal_dist * np.cos(ray_angle + world_pose[2])
         goal_y = world_pose[1] + goal_dist * np.sin(ray_angle + world_pose[2])
         
-        new_goal = np.array([goal_x, goal_y]) - self.robot_position
+        goal_world = np.array([goal_x, goal_y, 0])  # No orientation for goal
+        new_goal = self.transform_world_to_odom(goal_world)[:2]  # Only need x, y
+        
         self.debug_window.add_status_message(
             f"New goal set to: ({new_goal[0]:.1f}, {new_goal[1]:.1f})",
             self.debug_window.success_color
@@ -128,10 +148,6 @@ class MyRobotSlam(RobotAbstract):
             return False
 
     def path_following_control(self, world_pose, corrected_pose):
-        """
-        Control function for path following, tracks waypoints in self.path
-        Returns: command dictionary {"forward": float, "rotation": float}
-        """
         if not self.path or self.path_index >= len(self.path):
             self.debug_window.add_status_message(
                 "No valid path or path completed, stopping",
@@ -157,15 +173,13 @@ class MyRobotSlam(RobotAbstract):
                 return {"forward": 0, "rotation": 0}
 
         # Convert waypoint to odometry frame
-        goal_in_odom = next_waypoint[:2] - self.robot_position
+        waypoint_world = np.array([next_waypoint[0], next_waypoint[1], 0])
+        goal_in_odom = self.transform_world_to_odom(waypoint_world)
         command = potential_field_control(
             self.lidar(),
             corrected_pose,
-            np.array([goal_in_odom[0], goal_in_odom[1], corrected_pose[2]])
-        )
-        self.debug_window.add_status_message(
-            f"Following waypoint {self.path_index}: ({next_waypoint[0]:.1f}, {next_waypoint[1]:.1f}), dist: {dist_to_waypoint:.1f}",
-            self.debug_window.info_color
+            np.array([goal_in_odom[0], goal_in_odom[1], corrected_pose[2]]),
+            debug_window=self.debug_window
         )
         return command
 
@@ -185,26 +199,27 @@ class MyRobotSlam(RobotAbstract):
         return command
 
     def control_tp2(self):
-        """
-        Control function for TP2
-        Main control function with exploration using lidar data
-        """
         pose = self.odometer_values()
-        world_pose = np.array([self.robot_position[0] + pose[0], self.robot_position[1] + pose[1], pose[2]])
-        goal_in_odom = self.goal + pose[:2] - world_pose[:2]
+        world_pose = self.transform_odom_to_world(pose)
+        goal_in_odom = self.transform_world_to_odom(np.array([self.goal[0], self.goal[1], 0]))[:2]
         dist = np.linalg.norm(self.goal - world_pose[:2])
-        if dist <= 10 and self.iteration >= 25 and not self.path_following:
-            self.goal = self.select_new_goal()
-            goal_in_odom = self.goal
+        
+        # if dist <= 10 and self.iteration >= 25 and not self.path_following:
+        #     self.goal = self.select_new_goal()
+        #     goal_in_odom = self.goal
+
+        goal_in_odom = self.transform_world_to_odom(np.array([-500, -250, 0]))[:2]
         self.iteration += 1
-        command = potential_field_control(self.lidar(), pose, np.append(goal_in_odom, pose[2]))
+        command = potential_field_control(self.lidar(), pose, np.append(goal_in_odom, pose[2]), debug_window=self.debug_window)
+
         return command
 
     def control_tp3(self):
         pose = self.odometer_values()
         self.tiny_slam.update_map(self.lidar(), pose)
         self.tiny_slam.grid.display_cv(pose)
-        return self.control_tp2()
+        command = self.control_tp2()
+        return command
 
     def control_tp4(self):
         """
@@ -223,27 +238,9 @@ class MyRobotSlam(RobotAbstract):
         self.tiny_slam.update_map(self.lidar(), corrected_pose)
         command = self.control_tp2()
         self.last_command = command
-        world_pose = np.array([
-            self.robot_position[0] + corrected_pose[0],
-            self.robot_position[1] + corrected_pose[1]
-        ])
-        self.debug_window.update(
-            position=world_pose,
-            goal=self.goal,
-            speed=command["forward"],
-            rotation=command["rotation"],
-            slam_score=score,
-            iteration=self.iteration,
-            max_range=self.lidar().max_range,
-            mode="Exploring" if self.iteration < self.exploration_iterations else "Path Following"
-        )
-        self.debug_window.render()
         return command
 
     def control_tp5(self):
-        """
-        Control function for TP5 with SLAM, path planning, and path following
-        """
         # SLAM update
         raw_odom = self.odometer_values()
         score = self.tiny_slam.localise(self.lidar(), raw_odom)
@@ -258,21 +255,25 @@ class MyRobotSlam(RobotAbstract):
             )
 
         self.tiny_slam.update_map(self.lidar(), corrected_pose)
-        world_pose = np.array([
-            self.robot_position[0] + corrected_pose[0],
-            self.robot_position[1] + corrected_pose[1],
-            corrected_pose[2]
-        ])
+        world_pose = self.transform_odom_to_world(corrected_pose)
+
+        # Update position displays in different frames
+        self.debug_window.update_components({
+            "position_local": f"{raw_odom[0]:.1f}, {raw_odom[1]:.1f}, {raw_odom[2]:.1f}",
+            "position_odom": f"{corrected_pose[0]:.1f}, {corrected_pose[1]:.1f}, {corrected_pose[2]:.1f}",
+            "position_world": f"{world_pose[0]:.1f}, {world_pose[1]:.1f}, {world_pose[2]:.1f}"
+        })
 
         self.iteration += 1
 
         # Exploration phase
+        attractive_vel, repulsive_vel = 0.0, 0.0
         if self.iteration <= self.exploration_iterations:
             command = self.control_tp2()
             self.path_following = False
         else:
             self.path_following = True
-            # Plan path to origin at the end of exploration
+            # Path Planning
             if self.iteration == self.exploration_iterations + 1:
                 goal = np.array([0, 0, 0])
                 if not self.plan_path(world_pose, goal, corrected_pose):
@@ -283,10 +284,11 @@ class MyRobotSlam(RobotAbstract):
                         goal=np.array([0, 0]),
                         speed=command["forward"],
                         rotation=command["rotation"],
-                        slam_score=score,
                         iteration=self.iteration,
                         max_range=self.lidar().max_range,
-                        mode="Path Following"
+                        mode="Path Following",
+                        attractive_vel=0.0,
+                        repulsive_vel=0.0
                     )
                     self.debug_window.render()
                     return command
@@ -294,17 +296,25 @@ class MyRobotSlam(RobotAbstract):
             # Path following phase
             command = self.path_following_control(world_pose, corrected_pose)
 
+        # Get the velocities from the debug window's current state
+        attractive_vel = float(self.debug_window.labels["attractive_vel"].cget("text"))
+        repulsive_vel = float(self.debug_window.labels["repulsive_vel"].cget("text"))
+
         self.last_command = command
         self.debug_window.update(
             position=world_pose[:2],
             goal=self.goal if not self.path_following else (self.path[self.path_index][:2] if self.path and self.path_index < len(self.path) else np.array([0, 0])),
+            slam_score=score,
             speed=command["forward"],
             rotation=command["rotation"],
-            slam_score=score,
             iteration=self.iteration,
             max_range=self.lidar().max_range,
-            mode="Exploring" if not self.path_following else "Path Following"
+            mode="Exploring" if not self.path_following else "Path Following",
+            attractive_vel=attractive_vel,
+            repulsive_vel=repulsive_vel
         )
         self.debug_window.render()
+
+        self.tiny_slam.grid.display_cv(corrected_pose)
 
         return command

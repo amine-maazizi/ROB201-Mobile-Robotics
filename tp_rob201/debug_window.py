@@ -45,9 +45,12 @@ class DebugWindow:
         # Create labels for each piece of information
         self.labels = {}
         
-        # Robot Position
-        self.create_label("Robot Position", "position", "0, 0")
+        # Robot Positions in different frames
+        self.create_label("Robot Pos (Local)", "position_local", "0, 0, 0")
+        self.create_label("Robot Pos (Odom)", "position_odom", "0, 0, 0")
+        self.create_label("Robot Pos (World)", "position_world", "0, 0, 0")
         
+    
         # Goal Position
         self.create_label("Goal Position", "goal", "0, 0")
         
@@ -59,7 +62,14 @@ class DebugWindow:
         
         # Current Rotation
         self.create_label("Current Rotation", "rotation", "0.0")
-        
+
+        # Attractive Velocity (after rotation)
+        self.create_label("Attractive Velocity", "attractive_vel", "0.0")
+        # Repulsive Velocity (after attractive)
+        self.create_label("Repulsive Velocity", "repulsive_vel", "0.0")
+        # d_obs (after repulsive)
+        self.create_label("d_obs", "d_obs", "0.0")
+
         # SLAM Score
         self.create_label("SLAM Score", "slam_score", "0")
         
@@ -68,10 +78,10 @@ class DebugWindow:
         
         # Robot Mode
         self.create_label("Robot Mode", "mode", "Exploring")
-        
+
         # Status bar
         self.status_frame = ttk.Frame(self.main_frame, style="Custom.TFrame")
-        self.status_frame.grid(row=len(self.labels), column=0, sticky=(tk.W, tk.E), pady=(10, 0))
+        self.status_frame.grid(row=len(self.labels)+1, column=0, sticky=(tk.W, tk.E), pady=(10, 0))
         
         self.status_label = ttk.Label(self.status_frame, 
                                     text="Ready", 
@@ -99,7 +109,7 @@ class DebugWindow:
         self.score_threshold = 7000
         self.max_range = 1000  # Default value, will be updated
         self.mode = "Exploring"  # Default mode
-        
+
     def create_label(self, title, key, initial_value):
         """Helper method to create a label with title and value"""
         frame = ttk.Frame(self.main_frame, style="Custom.TFrame")
@@ -156,7 +166,7 @@ class DebugWindow:
                 self.message_start_time = None
                 self.status_label.config(text="Ready", foreground=self.info_color)
         
-    def update(self, position, goal, speed, rotation, slam_score, iteration, max_range=None, mode=None):
+    def update(self, position, goal, speed, rotation, slam_score, iteration, max_range=None, mode=None, attractive_vel=None, repulsive_vel=None):
         """Update the values displayed in the window with explicit parameters"""
         try:
             # Store state
@@ -170,11 +180,15 @@ class DebugWindow:
                 self.max_range = max_range
             if mode is not None:
                 self.mode = mode
+            if attractive_vel is not None:
+                self.labels["attractive_vel"].config(text=f"{attractive_vel:.3f}")
+            if repulsive_vel is not None:
+                self.labels["repulsive_vel"].config(text=f"{repulsive_vel:.3f}")
             
             # Update position
-            self.labels["position"].config(
-                text=f"{position[0]:.2f}, {position[1]:.2f}"
-            )
+            # self.labels["position"].config(
+            #     text=f"{position[0]:.2f}, {position[1]:.2f}"
+            # )
             
             # Update goal
             self.labels["goal"].config(
@@ -229,3 +243,19 @@ class DebugWindow:
             self.root.destroy()
         except Exception as e:
             print(f"Error closing debug window: {e}")
+
+    def update_component(self, name, value):
+        """Update the value of a label by name (if it exists)."""
+        if name in self.labels:
+            if isinstance(value, (int, float)):
+                self.labels[name].config(text=f"{value:.3f}")
+            else:
+                self.labels[name].config(text=str(value))
+
+    def update_components(self, components: dict):
+        """Update multiple label values by name using a dictionary."""
+        for name, value in components.items():
+            if isinstance(value, (int, float)):
+                self.labels[name].config(text=f"{value:.3f}")
+            else:
+                self.labels[name].config(text=str(value))

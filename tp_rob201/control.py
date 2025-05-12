@@ -30,43 +30,58 @@ def reactive_obst_avoid(lidar, angle, target_angle, is_rotating):
     
     return command
 
-def potential_field_control(lidar, current_pose, goal_pose, verbose=False):
+def potential_field_control(lidar, current_pose, goal_pose, verbose=False, debug_window=None):
     """
     Control using potential field for goal reaching and obstacle avoidance
     lidar : placebot object with lidar data
     current_pose : [x, y, theta] nparray, current pose in odometry frame
     goal_pose : [x, y, theta] nparray, target pose in odometry frame
     verbose : bool, whether to print debug information
+    debug_window : DebugWindow, optional, for live updates
+    Returns: command_dict
     """
     
     # Attractive potential gradient for goal
-    K_goal = 1.0
-    q = current_pose
-    q_goal = goal_pose
+    K_goal = 0.8
+    q = current_pose[:2]
+    q_goal = goal_pose[:2]
 
     d = np.linalg.norm(q_goal - q)
     if d > 0:
-        V = K_goal * (q_goal - q) / d
+        attractive = K_goal * (q_goal - q) / d
     else:
-        V = np.zeros(2)
+        attractive = np.zeros(2)
     
     # Repulsive potential gradient for obstacles
-    K_obs = 0.5
-    d_safe = 0.5
+    K_obs = 5.0
+    d_safe = 30
     distances = lidar.get_sensor_values()
     min_dist = np.min(distances)
     d_obs = min_dist - d_safe
-    if min_dist < d_safe and d_obs > 0:
-        V += K_obs * (1/min_dist - 1/d_safe) * (q - q_goal) / d_obs
+    repulsive = np.zeros(2)
+    if d_obs < 0:
+        repulsive = K_obs * (1/min_dist - 1/d_safe) * (q - q_goal) / d_obs
+    
+    # Total velocity
+    V = attractive - repulsive
     
     # Linear and angular velocities
     V_linear = np.clip(np.linalg.norm(V), -0.5, 0.5)
-    V_angular = np.arctan2(V[1], V[0]) - current_pose[2]
+    theta = current_pose[2]
+    V_angular = np.arctan2(V[1], V[0]) - theta
     V_angular = np.clip(V_angular, -1.0, 1.0)
     
     if verbose:
         print(f"Linear velocity: {V_linear}, Angular velocity: {V_angular}")
+        print(f"Attractive: {attractive}, Repulsive: {repulsive}")
     
-    return {"forward": V_linear, "rotation": V_angular}
+    if debug_window is not None:
+        debug_window.update_components({
+            "attractive_vel": np.linalg.norm(attractive),
+            "repulsive_vel": np.linalg.norm(repulsive),
+            "d_obs": d_obs
+        })
+    command = {"forward": V_linear, "rotation": V_angular}
+    return command
 
 

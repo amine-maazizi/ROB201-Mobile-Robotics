@@ -25,14 +25,15 @@ class Planner:
         """
         x, y = current_cell
         neighbors = [
-            (x+1, y), (x-1, y), (x, y+1), (x, y-1),  # Orthogonal neighbors
-            (x+1, y+1), (x+1, y-1), (x-1, y+1), (x-1, y-1)  # Diagonal neighbors
+            (x+1, y), (x-1, y), (x, y+1), (x, y-1),  
+            (x+1, y+1), (x+1, y-1), (x-1, y+1), (x-1, y-1)  
         ]
         valid_neighbors = []
         for nx, ny in neighbors:
+            # Checking boundaries
             if (0 <= nx < self.grid.x_max_map and 
                 0 <= ny < self.grid.y_max_map and 
-                self.grid.occupancy_map[nx, ny] < 0.5):  # Check bounds and free space
+                self.grid.occupancy_map[nx, ny] < 0.5):  
                 valid_neighbors.append((nx, ny))
         return valid_neighbors
 
@@ -55,12 +56,10 @@ class Planner:
         goal: [x, y, theta] nparray, goal pose in world coordinates (theta unused)
         Returns: list of [x, y, theta] poses in world coordinates forming the path
         """
-        # Convert start and goal to map coordinates
         start_map = self.grid.conv_world_to_map(start[0], start[1])
         goal_map = self.grid.conv_world_to_map(goal[0], goal[1])
 
-        # Initialize A* data structures
-        open_set = [(0, start_map)]  # Priority queue: (f_score, cell)
+        open_set = [(0, start_map)]  
         came_from = {}
         g_score = {start_map: 0}
         f_score = {start_map: self.heuristic(start_map, goal_map)}
@@ -73,14 +72,13 @@ class Planner:
                 path = []
                 while current in came_from:
                     wx, wy = self.grid.conv_map_to_world(current[0], current[1])
-                    path.append(np.array([wx, wy, 0]))  # Theta set to 0
+                    path.append(np.array([wx, wy, 0]))  
                     current = came_from[current]
                 wx, wy = self.grid.conv_map_to_world(start_map[0], start_map[1])
                 path.append(np.array([wx, wy, 0]))
                 return path[::-1]  # Reverse path to go from start to goal
 
             for neighbor in self.get_neighbors(current):
-                # Distance to neighbor (1 for orthogonal, sqrt(2) for diagonal in map units)
                 dist = 1.414 if abs(current[0] - neighbor[0]) + abs(current[1] - neighbor[1]) == 2 else 1
                 tentative_g_score = g_score[current] + dist * self.grid.resolution
 
@@ -90,9 +88,9 @@ class Planner:
                     f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal_map)
                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
 
-        return []  # Return empty path if no path is found
+        return [] 
 
     def explore_frontiers(self):
         """ Frontier based exploration """
-        goal = np.array([0, 0, 0])  # frontier to reach for exploration
+        goal = np.array([0, 0, 0])  
         return goal
