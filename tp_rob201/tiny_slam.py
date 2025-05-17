@@ -13,6 +13,8 @@ class TinySlam:
 
         # Origin of the odom frame in the map frame
         self.odom_pose_ref = np.array([0, 0, 0], dtype=np.float64)
+        
+        self.score_threshold = 4000
 
     def _score(self, lidar, pose, method="direct"):
         """
@@ -108,7 +110,7 @@ class TinySlam:
 
         # Initial score with current odom_pose_ref
         initial_absolute_pose = self.get_corrected_pose(raw_odom_pose, self.odom_pose_ref)
-        best_score = self._score(lidar, initial_absolute_pose, method="bilinear")
+        best_score = self._score(lidar, initial_absolute_pose, method="direct")
         best_odom_pose_ref = self.odom_pose_ref.copy()  
         no_improvement = 0
 
@@ -125,7 +127,7 @@ class TinySlam:
             else:
                 no_improvement += 1
 
-        if best_score > 7000:
+        if best_score > self.score_threshold:
             self.odom_pose_ref = best_odom_pose_ref
 
         return best_score
@@ -161,3 +163,5 @@ class TinySlam:
         pts_x = ranges * np.cos(ray_angles + theta) + x
         pts_y = ranges * np.sin(ray_angles + theta) + y
         return np.vstack([pts_x, pts_y]) 
+
+

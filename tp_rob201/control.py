@@ -40,47 +40,67 @@ def potential_field_control(lidar, current_pose, goal_pose, verbose=False, debug
     debug_window : DebugWindow, optional, for live updates
     Returns: command_dict
     """
-    
-    # Attractive potential gradient for goal
-    K_goal = 0.8
+    import numpy as np
+
+    # Parameters
+    K_goal = 0.8  # Attractive gain
+    K_obs = 2.0   # Repulsive gain (reduced for smoother avoidance)
+    d_safe = 25   # Safe distance (slightly reduced)
+    d_transition = 20  # Distance to switch to quadratic potential
+    d_stop = 5    # Stopping distance
+
+    # Current and goal positions
     q = current_pose[:2]
     q_goal = goal_pose[:2]
-
     d = np.linalg.norm(q_goal - q)
-    if d > 0:
-        attractive = K_goal * (q_goal - q) / d
+
+    # Attractive potential gradient
+    if d < d_stop:
+        attractive = np.zeros(2)  # Stop if close to goal
+    elif d < d_transition:
+        # Quadratic potential for smooth approach
+        attractive = K_goal * (q_goal - q)  # Gradient: K_goal * (q_goal - q)
     else:
-        attractive = np.zeros(2)
-    
-    # Repulsive potential gradient for obstacles
-    K_obs = 5.0
-    d_safe = 30
+        # Linear potential
+        attractive = K_goal * (q_goal - q) / d if d > 0 else np.zeros(2)
+
+    # Repulsive potential gradient
     distances = lidar.get_sensor_values()
-    min_dist = np.min(distances)
-    d_obs = min_dist - d_safe
+    angles = lidar.get_ray_angles()
     repulsive = np.zeros(2)
-    if d_obs < 0:
-        repulsive = K_obs * (1/min_dist - 1/d_safe) * (q - q_goal) / d_obs
-    
+    influence_range = d_safe * 1.5  # Consider obstacles within 1.5 * d_safe
+
+    for dist, angle in zip(distances, angles):
+        if dist < influence_range:
+            # Obstacle position relative to robot
+            q_obs = q + np.array([dist * np.cos(angle + current_pose[2]),
+                                 dist * np.sin(angle + current_pose[2])])
+            d_obs = dist - d_safe
+            if d_obs < 0:
+                # Repulsive force direction: away from obstacle
+                repulsive += K_obs * (1/dist - 1/d_safe) * (q - q_obs) / (d_obs + 1e-6)
+
     # Total velocity
-    V = attractive - repulsive
-    
+    V = attractive + repulsive  # Changed to + repulsive (direction is q - q_obs)
+
     # Linear and angular velocities
-    V_linear = np.clip(np.linalg.norm(V), -0.5, 0.5)
+    V_linear = np.clip(np.linalg.norm(V), -0.6, 0.6)  # Slightly increased range
     theta = current_pose[2]
     V_angular = np.arctan2(V[1], V[0]) - theta
-    V_angular = np.clip(V_angular, -1.0, 1.0)
-    
+    V_angular = np.clip(V_angular, -0.8, 0.8)  # Reduced angular range for stability
+
     if verbose:
         print(f"Linear velocity: {V_linear}, Angular velocity: {V_angular}")
         print(f"Attractive: {attractive}, Repulsive: {repulsive}")
-    
+        print(f"Distance to goal: {d}, Min distance to obstacle: {np.min(distances)}")
+
     if debug_window is not None:
         debug_window.update_components({
             "attractive_vel": np.linalg.norm(attractive),
             "repulsive_vel": np.linalg.norm(repulsive),
-            "d_obs": d_obs
+            "d_obs": np.min(distances) - d_safe
         })
+
     command = {"forward": V_linear, "rotation": V_angular}
     return command
 

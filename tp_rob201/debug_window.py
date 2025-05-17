@@ -106,7 +106,7 @@ class DebugWindow:
         self.rotation = 0.0
         self.slam_score = 0
         self.iteration = 0
-        self.score_threshold = 7000
+        self.score_threshold = 4000
         self.max_range = 1000  # Default value, will be updated
         self.mode = "Exploring"  # Default mode
 
