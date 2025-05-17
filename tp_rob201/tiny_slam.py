@@ -2,6 +2,7 @@
 
 import cv2
 import numpy as np
+import cma
 from occupancy_grid import OccupancyGrid
 
 
@@ -23,6 +24,8 @@ class TinySlam:
         pose: [x, y, theta] nparray, position of the robot in world coordinates
         method: str, "direct" for direct summation, "bilinear" for bilinear interpolation
         """
+        import numpy as np
+
         MAX_RANGE = lidar.max_range
         lidar_values, lidar_angles = lidar.get_sensor_values(), lidar.get_ray_angles()
         lidar_angles = lidar_angles[lidar_values < MAX_RANGE]    
@@ -32,11 +35,40 @@ class TinySlam:
         detected_points = TinySlam.pol_to_cart2(lidar_values, lidar_angles, pose)
         x_world, y_world = detected_points[0], detected_points[1]
 
-        #  world -> map coordinates
+        # World -> map coordinates
         map_points = self.grid.conv_world_to_map(x_world, y_world)
         x_indices_float, y_indices_float = map_points[0], map_points[1]
 
         total_score = 0.0
+
+        def bilinear_interpolate(x, y, x_idx, y_idx):
+            """Internal function to compute bilinear interpolation for a single point."""
+            # Skip points outside the map
+            if x_idx < 0 or x_idx >= self.grid.x_max_map - 1 or y_idx < 0 or y_idx >= self.grid.y_max_map - 1:
+                return 0.0
+
+            # Find the four surrounding grid points
+            x0_idx = int(x_idx)
+            y0_idx = int(y_idx)
+            x1_idx = x0_idx + 1
+            y1_idx = y0_idx + 1
+
+            # Convert grid indices back to world coordinates to get x0, x1, y0, y1
+            x0, y0 = self.grid.conv_map_to_world(x0_idx, y0_idx)
+            x1, y1 = self.grid.conv_map_to_world(x1_idx, y1_idx)
+
+            # Get occupancy values at the four corners (M(P_00), M(P_01), M(P_10), M(P_11))
+            m_00 = self.grid.occupancy_map[x0_idx, y0_idx]
+            m_01 = self.grid.occupancy_map[x0_idx, y1_idx]
+            m_10 = self.grid.occupancy_map[x1_idx, y0_idx]
+            m_11 = self.grid.occupancy_map[x1_idx, y1_idx]
+
+            # Compute interpolation weights
+            dx = (x - x0) / (x1 - x0) if x1 != x0 else 0
+            dy = (y - y0) / (y1 - y0) if y1 != y0 else 0
+
+            # Bilinear interpolation formula
+            return (1 - dy) * ((1 - dx) * m_00 + dx * m_10) + dy * ((1 - dx) * m_01 + dx * m_11)
 
         if method == "direct":
             # Sum of the values in the grid
@@ -45,35 +77,12 @@ class TinySlam:
             total_score = np.sum(self.grid.occupancy_map[x_indices, y_indices])
 
         elif method == "bilinear":
-            # Bilinear interpolation method
-            for x, y, x_idx, y_idx in zip(x_world, y_world, x_indices_float, y_indices_float):
-                # Skip points outside the map
-                if x_idx < 0 or x_idx >= self.grid.x_max_map - 1 or y_idx < 0 or y_idx >= self.grid.y_max_map - 1:
-                    continue
-
-                # Find the four surrounding grid points
-                x0_idx = int(x_idx)
-                y0_idx = int(y_idx)
-                x1_idx = x0_idx + 1
-                y1_idx = y0_idx + 1
-
-                # Convert grid indices back to world coordinates to get x0, x1, y0, y1
-                x0, y0 = self.grid.conv_map_to_world(x0_idx, y0_idx)
-                x1, y1 = self.grid.conv_map_to_world(x1_idx, y1_idx)
-
-                # Get occupancy values at the four corners (M(P_00), M(P_01), M(P_10), M(P_11))
-                m_00 = self.grid.occupancy_map[x0_idx, y0_idx]
-                m_01 = self.grid.occupancy_map[x0_idx, y1_idx]
-                m_10 = self.grid.occupancy_map[x1_idx, y0_idx]
-                m_11 = self.grid.occupancy_map[x1_idx, y1_idx]
-
-                # Compute interpolation weights
-                dx = (x - x0) / (x1 - x0) if x1 != x0 else 0
-                dy = (y - y0) / (y1 - y0) if y1 != y0 else 0
-
-                # Bilinear interpolation formula
-                score = (1 - dy) * ((1 - dx) * m_00 + dx * m_10) + dy * ((1 - dx) * m_01 + dx * m_11)
-                total_score += score
+            # Use the internal bilinear interpolation function for each point
+            scores = np.array([
+                bilinear_interpolate(x, y, x_idx, y_idx)
+                for x, y, x_idx, y_idx in zip(x_world, y_world, x_indices_float, y_indices_float)
+            ])
+            total_score = np.sum(scores)
 
         else:
             raise ValueError("Method must be 'direct' or 'bilinear'")
@@ -101,50 +110,115 @@ class TinySlam:
 
         return corrected_pose
 
-    def localise(self, lidar, raw_odom_pose, N=200, variance=0.2):
+    def localise(self, lidar, raw_odom_pose, N=200, variance=0.2, localisation_method="simple"):
         """
         Compute the robot position wrt the map, and updates the odometry reference
         lidar : placebot object with lidar data
         odom : [x, y, theta] nparray, raw odometry position
+        N : int, number of iterations or population size
+        variance : float, initial variance for random sampling
+        localisation_method : str, method to use ("simple", "cem", "cma-es")
         """
-
-        # Initial score with current odom_pose_ref
+        # Initial pose and score
         initial_absolute_pose = self.get_corrected_pose(raw_odom_pose, self.odom_pose_ref)
         best_score = self._score(lidar, initial_absolute_pose, method="direct")
-        best_odom_pose_ref = self.odom_pose_ref.copy()  
-        no_improvement = 0
+        best_odom_pose_ref = self.odom_pose_ref.copy()
 
-        while no_improvement < N:
-            offset = np.random.normal(0, variance, 3)
-            new_pose_ref = best_odom_pose_ref + offset
-            new_absolute_pose = self.get_corrected_pose(raw_odom_pose, new_pose_ref)
-            score = self._score(lidar, new_absolute_pose)
+        def run_optimisation(method):
+            """Internal function to run localisation optimisation."""
+            nonlocal best_score, best_odom_pose_ref
 
-            if score > best_score:
-                best_score = score
-                best_odom_pose_ref = new_pose_ref
+            if method == "simple":
                 no_improvement = 0
-            else:
-                no_improvement += 1
+                while no_improvement < N:
+                    offset = np.random.normal(0, variance, 3)
+                    new_pose_ref = best_odom_pose_ref + offset
+                    new_absolute_pose = self.get_corrected_pose(raw_odom_pose, new_pose_ref)
+                    score = self._score(lidar, new_absolute_pose)
 
+                    if score > best_score:
+                        best_score = score
+                        best_odom_pose_ref = new_pose_ref.copy()
+                        no_improvement = 0
+                    else:
+                        no_improvement += 1
+
+            elif method == "cem":
+                mu = best_odom_pose_ref.copy()
+                sigma = variance
+                elite_fraction = 0.1
+                for _ in range(N // 10):  # Run for fewer iterations with population
+                    population = np.random.normal(mu, sigma, (10, 3))
+                    scores = np.array([
+                        self._score(lidar, self.get_corrected_pose(raw_odom_pose, pose))
+                        for pose in population
+                    ])
+                    elite_idx = np.argsort(scores)[-int(10 * elite_fraction):]
+                    elite_poses = population[elite_idx]
+                    mu = np.mean(elite_poses, axis=0)
+                    sigma = np.std(elite_poses, axis=0).mean() + 1e-3  # Add small epsilon
+                    if scores[elite_idx[-1]] > best_score:
+                        best_score = scores[elite_idx[-1]]
+                        best_odom_pose_ref = population[elite_idx[-1]].copy()
+
+            elif method == "cma-es":
+                if cma is None:
+                    raise ImportError("CMA-ES requires the 'cma' package. Install it via pip.")
+                options = {'maxiter': N // 10, 'popsize': 10, 'verbose': -1}
+                result = cma.fmin(
+                    lambda x: -self._score(lidar, self.get_corrected_pose(raw_odom_pose, x)),
+                    best_odom_pose_ref.copy(), variance, options=options
+                )
+                if -result[1] > best_score:
+                    best_score = -result[1]
+                    best_odom_pose_ref = result[0].copy()
+
+            else:
+                raise ValueError("Unknown localisation method")
+
+        # Run the selected optimisation method
+        run_optimisation(localisation_method)
+
+        # Update odometry reference if score exceeds threshold
         if best_score > self.score_threshold:
             self.odom_pose_ref = best_odom_pose_ref
 
         return best_score
-
-    def update_map(self, lidar, pose):
+    
+    def update_map(self, lidar, pose, sensor_model="simple"):
         """
         Bayesian map update with new observation
         lidar : placebot object with lidar data
         pose : [x, y, theta] nparray, corrected pose in world coordinates
+        sensor_model : str, sensor model to use ("simple", "intermediate", "gaussian", "noisy")
         """
-        # Get the corrected pose using the current odom_pose_ref
+        import numpy as np
+
+        # Get the corrected pose
         x0, y0, _ = pose
         
         # Convert lidar measurements to world coordinates
         detected_points = TinySlam.pol_to_cart2(lidar.get_sensor_values(), lidar.get_ray_angles(), pose)
         
+        def get_probabilities(model, dist, max_dist, is_occupied):
+            """Calculate probability updates based on sensor model."""
+            if model == "simple":
+                return 3.98 if is_occupied else -1.99
+            elif model == "intermediate":
+                factor = 1 - dist / max_dist if not is_occupied else dist / max_dist
+                return (3.98 if is_occupied else -1.99) * max(0.1, factor)
+            elif model == "gaussian":
+                sigma = 10.0  # Standard deviation for Gaussian
+                prob = np.exp(-0.5 * (dist / sigma) ** 2)
+                return (3.98 if is_occupied else -1.99) * prob
+            elif model == "noisy":
+                noise = np.random.normal(0, 0.2)  # Small Gaussian noise
+                return (3.98 if is_occupied else -1.99) + noise
+            else:
+                raise ValueError("Unknown sensor model")
+
         PADDING = 20
+        max_range = lidar.max_range
         for x, y in zip(*detected_points):
             target_x, target_y = x, y
             if x0 != x:
@@ -152,9 +226,19 @@ class TinySlam:
             if y0 != y:
                 target_y += (PADDING) if y0 > y else (-PADDING)
 
-            self.grid.add_value_along_line(x0, y0, target_x, target_y, -1.99)
+            # Update probabilities along the line (free space)
+            self.grid.add_value_along_line(
+                x0, y0, target_x, target_y, 
+                get_probabilities(sensor_model, 0, max_range, is_occupied=False)
+            )
 
-        self.grid.add_map_points(detected_points[0], detected_points[1], 3.98)
+        # Update probabilities at detected points (occupied)
+        self.grid.add_map_points(
+            detected_points[0], detected_points[1], 
+            get_probabilities(sensor_model, 0, max_range, is_occupied=True)
+        )
+        
+        # Clip occupancy map to prevent extreme values
         self.grid.occupancy_map = np.clip(self.grid.occupancy_map, -40, 40)
 
     @staticmethod

@@ -166,7 +166,7 @@ class DebugWindow:
                 self.message_start_time = None
                 self.status_label.config(text="Ready", foreground=self.info_color)
         
-    def update(self, position, goal, speed, rotation, slam_score, iteration, max_range=None, mode=None, attractive_vel=None, repulsive_vel=None):
+    def update(self, position, goal, speed, rotation, slam_score, iteration, max_range=None, mode=None, attractive_vel=None, repulsive_vel=None, position_local=None, position_odom=None, position_world=None):
         """Update the values displayed in the window with explicit parameters"""
         try:
             # Store state
@@ -185,10 +185,13 @@ class DebugWindow:
             if repulsive_vel is not None:
                 self.labels["repulsive_vel"].config(text=f"{repulsive_vel:.3f}")
             
-            # Update position
-            # self.labels["position"].config(
-            #     text=f"{position[0]:.2f}, {position[1]:.2f}"
-            # )
+            # Update position frames if provided
+            if position_local is not None:
+                self.labels["position_local"].config(text=position_local)
+            if position_odom is not None:
+                self.labels["position_odom"].config(text=position_odom)
+            if position_world is not None:
+                self.labels["position_world"].config(text=position_world)
             
             # Update goal
             self.labels["goal"].config(

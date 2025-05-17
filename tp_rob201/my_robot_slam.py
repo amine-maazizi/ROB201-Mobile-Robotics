@@ -1,7 +1,3 @@
-"""
-Robot controller definition
-Complete controller including SLAM, planning, path following
-"""
 import numpy as np
 
 from place_bot.entities.robot_abstract import RobotAbstract
@@ -11,7 +7,7 @@ from place_bot.entities.lidar import LidarParams
 from tiny_slam import TinySlam
 from debug_window import DebugWindow
 
-from control import potential_field_control, reactive_obst_avoid
+from control import potential_field_control, reactive_obst_avoid, potential_field_control_w_clustering, dynamic_window_control
 from occupancy_grid import OccupancyGrid
 from planner import Planner
 
@@ -51,7 +47,7 @@ class MyRobotSlam(RobotAbstract):
 
         # TP2
         self.robot_position = np.array(robot_position)
-        self.goal = np.array([-500, -250])
+        self.goal = np.array([-400  , -50])
         self.theta_Oref = 0
 
         # TP4
@@ -71,7 +67,7 @@ class MyRobotSlam(RobotAbstract):
         """Transform a pose from odometry frame to world frame."""
         x_0, y_0, theta_0 = odom_pose
         x_Oref, y_Oref = self.robot_position
-        theta_Oref = getattr(self, 'theta_Oref', 0)  # Default to 0 if not set
+        theta_Oref = getattr(self, 'theta_Oref', 0)
         x = x_Oref + x_0 * np.cos(theta_Oref) - y_0 * np.sin(theta_Oref)
         y = y_Oref + x_0 * np.sin(theta_Oref) + y_0 * np.cos(theta_Oref)
         theta = theta_0 + theta_Oref
@@ -87,14 +83,9 @@ class MyRobotSlam(RobotAbstract):
         theta_0 = theta - theta_Oref
         return np.array([x_0, y_0, theta_0])
 
-
     def plan_path(self, start_pose, goal_pose, corrected_pose):
         """
         Plan a path from start_pose to goal_pose using the planner and visualize it
-        start_pose: [x, y, theta] in world coordinates
-        goal_pose: [x, y, theta] in world coordinates
-        corrected_pose: [x, y, theta] in odometry frame for visualization
-        Returns: bool, True if path is planned successfully, False otherwise
         """
         self.path = self.planner.plan(start_pose, goal_pose)
         self.path_index = 0
@@ -125,7 +116,7 @@ class MyRobotSlam(RobotAbstract):
         next_waypoint = self.path[self.path_index]
         dist_to_waypoint = np.linalg.norm(world_pose[:2] - next_waypoint[:2])
         
-        if dist_to_waypoint < 20:  # Waypoint reached
+        if dist_to_waypoint < 20:
             self.path_index += 1
             if self.path_index < len(self.path):
                 self.debug_window.add_status_message(
@@ -139,7 +130,6 @@ class MyRobotSlam(RobotAbstract):
                 )
                 return {"forward": 0, "rotation": 0}
 
-        # Convert waypoint to odometry frame
         waypoint_world = np.array([next_waypoint[0], next_waypoint[1], 0])
         goal_in_odom = self.transform_world_to_odom(waypoint_world)
         command = potential_field_control(
@@ -154,47 +144,117 @@ class MyRobotSlam(RobotAbstract):
         """
         Main control function executed at each time step
         """
-        return self.control_tp5()
+        self.debug_window.render()
+        return self.control_tp2()
 
     def control_tp1(self):
         """
-        Control function for TP1
-        Control function with minimal random motion
+        Control function for TP1 with minimal random motion
         """
         _, _, theta = self.odometer_values()
         command, self.is_rotating = reactive_obst_avoid(self.lidar(), theta, self.target_angle, self.is_rotating)
+        
+        # Debug rendering
+        self.debug_window.update_components({
+            "attractive_vel": 0.0,  # No attractive force in TP1
+            "repulsive_vel": 0.0,   # No repulsive force computed explicitly
+            "d_obs": np.min(self.lidar().get_sensor_values()) - 25  # Assume d_safe=25
+        })
+        self.debug_window.update(
+            position=self.odometer_values()[:2],
+            goal=np.array([0, 0]),  # No specific goal in TP1
+            slam_score=0.0,
+            speed=command["forward"],
+            rotation=command["rotation"],
+            iteration=self.iteration,
+            max_range=self.lidar().max_range,
+            mode="Rotating",
+            attractive_vel=0.0,
+            repulsive_vel=0.0
+        )
+        
+        
+        self.last_command = command
         return command
 
     def control_tp2(self):
-        # Get current pose in odometry frame
-        current_pose = self.odometer_values()  # [x, y, theta] in odometry frame
+        """
+        Control function for TP2 with potential field
+        """
+        current_pose = self.odometer_values()
+        world_pose = self.transform_odom_to_world(current_pose)
 
-        # Transform goal from world frame to odometry frame
-        goal_world = np.array([self.goal[0], self.goal[1], 0])  # Goal in world frame, theta=0
-        goal_odom = self.transform_world_to_odom(goal_world)   # [x, y, theta] in odometry frame
-
-        # Increment iteration counter
+        goal_world = np.array([self.goal[0], self.goal[1], 0])
+        goal_odom = self.transform_world_to_odom(goal_world)
         self.iteration += 1
 
-        # Call potential_field_control with poses in odometry frame
         command = potential_field_control(self.lidar(), current_pose, goal_odom, debug_window=self.debug_window)
-
+        
+        # command = dynamic_window_control(self.lidar(), world_pose, goal_odom)
+        
+        self.debug_window.update(
+            position=current_pose[:2],
+            goal=self.goal,
+            slam_score=0.0,
+            speed=command["forward"],
+            rotation=command["rotation"],
+            iteration=self.iteration,
+            max_range=self.lidar().max_range,
+            mode="Potential Field",
+            attractive_vel=float(self.debug_window.labels["attractive_vel"].cget("text")),
+            repulsive_vel=float(self.debug_window.labels["repulsive_vel"].cget("text")),
+            position_local=f"{current_pose[0]:.1f}, {current_pose[1]:.1f}, {current_pose[2]:.1f}",
+            position_odom=f"{current_pose[0]:.1f}, {current_pose[1]:.1f}, {current_pose[2]:.1f}",
+            position_world=f"{world_pose[0]:.1f}, {world_pose[1]:.1f}, {world_pose[2]:.1f}"
+        )
+        
+        self.last_command = command
         return command
 
     def control_tp3(self):
+        """
+        Control function for TP3 with SLAM
+        """
         pose = self.odometer_values()
-        self.tiny_slam.update_map(self.lidar(), pose)
+        self.tiny_slam.update_map(self.lidar(), pose, sensor_model="noisy")
         self.tiny_slam.grid.display_cv(pose)
-        command = self.control_tp2()
+        
+        current_pose = pose
+        world_pose = self.transform_odom_to_world(current_pose)
+
+        goal_world = np.array([self.goal[0], self.goal[1], 0])
+        goal_odom = self.transform_world_to_odom(goal_world)
+        self.iteration += 1
+
+        command = potential_field_control(self.lidar(), world_pose, goal_odom, debug_window=self.debug_window)
+        
+        self.debug_window.update(
+            position=current_pose[:2],
+            goal=self.goal,
+            slam_score=0.0,
+            speed=command["forward"],
+            rotation=command["rotation"],
+            iteration=self.iteration,
+            max_range=self.lidar().max_range,
+            mode="SLAM",
+            attractive_vel=float(self.debug_window.labels["attractive_vel"].cget("text")),
+            repulsive_vel=float(self.debug_window.labels["repulsive_vel"].cget("text")),
+            position_local=f"{current_pose[0]:.1f}, {current_pose[1]:.1f}, {current_pose[2]:.1f}",
+            position_odom=f"{current_pose[0]:.1f}, {current_pose[1]:.1f}, {current_pose[2]:.1f}",
+            position_world=f"{world_pose[0]:.1f}, {world_pose[1]:.1f}, {world_pose[2]:.1f}"
+        )
+        
+        self.last_command = command
         return command
 
     def control_tp4(self):
         """
-        Control function for TP4 with SLAM
+        Control function for TP4 with SLAM and localization
         """
         raw_odom = self.odometer_values()
-        score = self.tiny_slam.localise(self.lidar(), raw_odom)
+        score = self.tiny_slam.localise(self.lidar(), raw_odom, localisation_method="cem")
         corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
+
         if score > self.tiny_slam.score_threshold:
             old_position = self.robot_position.copy()
             self.robot_position = corrected_pose[:2]
@@ -202,15 +262,41 @@ class MyRobotSlam(RobotAbstract):
                 f"Position updated: ({old_position[0]:.1f}, {old_position[1]:.1f}) → ({self.robot_position[0]:.1f}, {self.robot_position[1]:.1f})",
                 self.debug_window.warning_color
             )
-        self.tiny_slam.update_map(self.lidar(), corrected_pose)
+
+        self.tiny_slam.update_map(self.lidar(), corrected_pose, sensor_model="noisy")
         self.tiny_slam.grid.display_cv(corrected_pose)
-        # Exploration phase
-        command = self.control_tp2()
+        
+        goal_world = np.array([self.goal[0], self.goal[1], 0])
+        world_pose = self.transform_odom_to_world(corrected_pose)
+        goal_odom = self.transform_world_to_odom(goal_world)
+
+        self.iteration += 1
+
+        command = potential_field_control(self.lidar(), world_pose, goal_odom, debug_window=self.debug_window)
+        
+        self.debug_window.update(
+            position=world_pose[:2],
+            goal=self.goal,
+            slam_score=score,
+            speed=command["forward"],
+            rotation=command["rotation"],
+            iteration=self.iteration,
+            max_range=self.lidar().max_range,
+            mode="SLAM+Localization",
+            attractive_vel=float(self.debug_window.labels["attractive_vel"].cget("text")),
+            repulsive_vel=float(self.debug_window.labels["repulsive_vel"].cget("text")),
+            position_local=f"{raw_odom[0]:.1f}, {raw_odom[1]:.1f}, {raw_odom[2]:.1f}",
+            position_odom=f"{corrected_pose[0]:.1f}, {corrected_pose[1]:.1f}, {corrected_pose[2]:.1f}",
+            position_world=f"{world_pose[0]:.1f}, {world_pose[1]:.1f}, {world_pose[2]:.1f}"
+        )
+        
         self.last_command = command
         return command
 
     def control_tp5(self):
-        # SLAM update
+        """
+        Control function for TP5 with SLAM, planning, and path following
+        """
         raw_odom = self.odometer_values()
         score = self.tiny_slam.localise(self.lidar(), raw_odom)
         corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
@@ -223,28 +309,16 @@ class MyRobotSlam(RobotAbstract):
                 self.debug_window.warning_color
             )
 
-        self.tiny_slam.update_map(self.lidar(), corrected_pose)
+        self.tiny_slam.update_map(self.lidar(), corrected_pose) # TBT
         world_pose = self.transform_odom_to_world(corrected_pose)
-
-        # Update position displays in different frames
-        self.debug_window.update_components({
-            "position_local": f"{raw_odom[0]:.1f}, {raw_odom[1]:.1f}, {raw_odom[2]:.1f}",
-            "position_odom": f"{corrected_pose[0]:.1f}, {corrected_pose[1]:.1f}, {corrected_pose[2]:.1f}",
-            "position_world": f"{world_pose[0]:.1f}, {world_pose[1]:.1f}, {world_pose[2]:.1f}"
-        })
 
         self.iteration += 1
 
-        # Initialize velocities
-        attractive_vel, repulsive_vel = 0.0, 0.0
-
-        # Exploration phase
         if self.iteration <= self.exploration_iterations:
             command = self.control_tp2()
             self.path_following = False
         else:
             self.path_following = True
-            # Path Planning
             if self.iteration == self.exploration_iterations + 1:
                 goal = np.array([0, 0, 0])
                 if not self.plan_path(world_pose, goal, corrected_pose):
@@ -252,19 +326,16 @@ class MyRobotSlam(RobotAbstract):
                 else:
                     command = self.path_following_control(world_pose, corrected_pose)
             else:
-                # Path following phase
                 command = self.path_following_control(world_pose, corrected_pose)
 
-        # Update velocities from debug window (if needed)
+        # Debug rendering
+        goal = self.goal if not self.path_following else (self.path[self.path_index][:2] if self.path and self.path_index < len(self.path) else np.array([0, 0]))
         attractive_vel = float(self.debug_window.labels["attractive_vel"].cget("text"))
         repulsive_vel = float(self.debug_window.labels["repulsive_vel"].cget("text"))
-
-        self.last_command = command
-
-        # Consolidated debug window update
+        
         self.debug_window.update(
             position=world_pose[:2],
-            goal=self.goal if not self.path_following else (self.path[self.path_index][:2] if self.path and self.path_index < len(self.path) else np.array([0, 0])),
+            goal=goal,
             slam_score=score,
             speed=command["forward"],
             rotation=command["rotation"],
@@ -272,11 +343,13 @@ class MyRobotSlam(RobotAbstract):
             max_range=self.lidar().max_range,
             mode="Exploring" if not self.path_following else "Path Following",
             attractive_vel=attractive_vel,
-            repulsive_vel=repulsive_vel
+            repulsive_vel=repulsive_vel,
+            position_local=f"{raw_odom[0]:.1f}, {raw_odom[1]:.1f}, {raw_odom[2]:.1f}",
+            position_odom=f"{corrected_pose[0]:.1f}, {corrected_pose[1]:.1f}, {corrected_pose[2]:.1f}",
+            position_world=f"{world_pose[0]:.1f}, {world_pose[1]:.1f}, {world_pose[2]:.1f}"
         )
-        self.debug_window.render()
-
-        # Display SLAM grid in OpenCV
-        self.tiny_slam.grid.display_cv(corrected_pose)
-
+        
+        # self.tiny_slam.grid.display_cv(corrected_pose)
+        
+        self.last_command = command
         return command
