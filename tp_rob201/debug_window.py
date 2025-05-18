@@ -10,13 +10,13 @@ class DebugWindow:
         self.root.title("Robot Debug Window")
         
         # Configure dark theme colors
-        self.bg_color = "#2E3440"  # Dark background
-        self.fg_color = "#ECEFF4"  # Light text
-        self.accent_color = "#88C0D0"  # Accent color
-        self.success_color = "#A3BE8C"  # Green
-        self.warning_color = "#EBCB8B"  # Yellow
-        self.error_color = "#BF616A"   # Red
-        self.info_color = "#81A1C1"    # Blue
+        self.bg_color = "#2E3440"
+        self.fg_color = "#ECEFF4"
+        self.accent_color = "#88C0D0"
+        self.success_color = "#A3BE8C"
+        self.warning_color = "#EBCB8B"
+        self.error_color = "#BF616A"
+        self.info_color = "#81A1C1"
         
         # Configure root window
         self.root.configure(bg=self.bg_color)
@@ -50,7 +50,6 @@ class DebugWindow:
         self.create_label("Robot Pos (Odom)", "position_odom", "0, 0, 0")
         self.create_label("Robot Pos (World)", "position_world", "0, 0, 0")
         
-    
         # Goal Position
         self.create_label("Goal Position", "goal", "0, 0")
         
@@ -63,11 +62,11 @@ class DebugWindow:
         # Current Rotation
         self.create_label("Current Rotation", "rotation", "0.0")
 
-        # Attractive Velocity (after rotation)
+        # Attractive Velocity
         self.create_label("Attractive Velocity", "attractive_vel", "0.0")
-        # Repulsive Velocity (after attractive)
+        # Repulsive Velocity
         self.create_label("Repulsive Velocity", "repulsive_vel", "0.0")
-        # d_obs (after repulsive)
+        # d_obs
         self.create_label("d_obs", "d_obs", "0.0")
 
         # SLAM Score
@@ -93,7 +92,7 @@ class DebugWindow:
         self.message_queue = []
         self.current_message = None
         self.message_start_time = None
-        self.message_duration = timedelta(seconds=3)  # Messages stay for 3 seconds
+        self.message_duration = timedelta(seconds=3)
         
         # Configure grid weights
         self.root.columnconfigure(0, weight=1)
@@ -107,8 +106,8 @@ class DebugWindow:
         self.slam_score = 0
         self.iteration = 0
         self.score_threshold = 4000
-        self.max_range = 1000  # Default value, will be updated
-        self.mode = "Exploring"  # Default mode
+        self.max_range = 1000
+        self.mode = "Exploring"
 
     def create_label(self, title, key, initial_value):
         """Helper method to create a label with title and value"""
@@ -127,18 +126,14 @@ class DebugWindow:
         
     def get_color_gradient(self, value, min_val, max_val):
         """Convert a value to a color in the gradient from green to red"""
-        # Normalize value between 0 and 1
         normalized = (value - min_val) / (max_val - min_val)
-        normalized = max(0, min(1, normalized))  # Clamp between 0 and 1
+        normalized = max(0, min(1, normalized))
         
-        # Convert to HSV (green is 120 degrees, red is 0 degrees)
-        h = (1 - normalized) * 120  # Invert so green is good (0) and red is bad (1)
-        s = 0.8  # High saturation
-        v = 0.9  # High value
+        h = (1 - normalized) * 120
+        s = 0.8
+        v = 0.9
         
-        # Convert HSV to RGB
         rgb = hsv_to_rgb(h/360, s, v)
-        # Convert to hex color
         return f'#{int(rgb[0]*255):02x}{int(rgb[1]*255):02x}{int(rgb[2]*255):02x}'
     
     def add_status_message(self, message, color=None):
@@ -151,12 +146,10 @@ class DebugWindow:
         """Update the status message display"""
         current_time = datetime.now()
         
-        # If no current message or current message has expired
         if (self.current_message is None or 
             self.message_start_time is None or 
             current_time - self.message_start_time > self.message_duration):
             
-            # Get next message from queue
             if self.message_queue:
                 self.current_message, color = self.message_queue.pop(0)
                 self.message_start_time = current_time
@@ -185,7 +178,7 @@ class DebugWindow:
             if repulsive_vel is not None:
                 self.labels["repulsive_vel"].config(text=f"{repulsive_vel:.3f}")
             
-            # Update position frames if provided
+            # Update position frames
             if position_local is not None:
                 self.labels["position_local"].config(text=position_local)
             if position_odom is not None:

@@ -11,12 +11,10 @@ def reactive_obst_avoid(lidar, angle, target_angle, is_rotating):
     Simple obstacle avoidance
     lidar : placebot object with lidar data
     """    
-    # Safe distance from wall
     safe_distance = 0.3
     max_speed = 0.5
     max_rotation = 1.0
     
-    # Get lidar distances
     distances = lidar.get_sensor_values()
     min_distance = np.min(distances)
     
@@ -42,78 +40,63 @@ def potential_field_control(lidar, current_pose, goal_pose, verbose=False, debug
     debug_window : DebugWindow, optional, for live updates
     Returns: command_dict
     """
+    # Control parameters
+    K_goal = 0.5
+    K_obs = 5.0
+    d_safe = 50
+    d_transition = 80
+    d_stop = 15
+    eta = 0.3
+    max_linear_vel = 0.3
+    max_angular_vel = 1.0
 
-    # Parameters
-    K_goal = 0.8  # Attractive gain
-    K_obs = 2.0  # Increased repulsive gain for stronger avoidance
-    d_safe = 25   # Reduced safe distance for earlier reaction
-    d_transition = 50  # Increased for smoother transition
-    d_stop = 10   # Tighter stopping distance
-    eta = 0.1     # Damping factor for angular velocity
-    max_linear_vel = 0.4  # Reduced max linear velocity for safety
-    max_angular_vel = 0.5  # Reduced for smoother turns
-
-    # Current and goal positions
     q = current_pose[:2]
     q_goal = goal_pose[:2]
     d = np.linalg.norm(q_goal - q)
 
-    # Attractive potential gradient
+    # Attractive potential with smooth transition near goal
     if d < d_stop:
-        attractive = np.zeros(2)  # Stop if close to goal
+        attractive = np.zeros(2)
         orientation_error = np.arctan2(np.sin(goal_pose[2] - current_pose[2]), 
-                                       np.cos(goal_pose[2] - current_pose[2]))
+                                     np.cos(goal_pose[2] - current_pose[2]))
     else:
-        # Smooth transition using a blended potential
         if d < d_transition:
-            attractive = K_goal * (q_goal - q) * (d / d_transition)  # Quadratic-like
+            attractive = K_goal * (q_goal - q) * (d / d_transition)
         else:
-            attractive = K_goal * (q_goal - q) / (d + 1e-6)  # Linear, avoid division by zero
-        orientation_error = 0  # Focus on position, not orientation, when far
+            attractive = K_goal * (q_goal - q) / (d + 1e-6)
+        orientation_error = 0
 
-    # Repulsive potential gradient
+    # Repulsive potential from obstacles
     distances = lidar.get_sensor_values()
     angles = lidar.get_ray_angles()
     repulsive = np.zeros(2)
-    influence_range = d_safe * 2.0  # Increased range for earlier obstacle detection
+    influence_range = d_safe * 2.0
 
     for dist, angle in zip(distances, angles):
         if dist < influence_range:
-            # Obstacle position relative to robot
             q_obs = q + np.array([dist * np.cos(angle + current_pose[2]),
                                  dist * np.sin(angle + current_pose[2])])
             d_obs = dist - d_safe
             if d_obs < 0:
-                # Stronger repulsive force, decay with distance
                 repulsive += K_obs * (1/d_obs - 1/d_safe) * (q - q_obs) / (dist**2 + 1e-6)
 
-    # Total velocity
     V = attractive - repulsive
-
-    # Linear and angular velocities
     V_linear = np.clip(np.linalg.norm(V), 0, max_linear_vel)
     
-    # Smooth angular velocity with damping
     if d < d_stop:
-        # Align orientation at goal
         V_angular = eta * orientation_error
     else:
         desired_heading = np.arctan2(V[1], V[0])
         heading_error = np.arctan2(np.sin(desired_heading - current_pose[2]),
-                                  np.cos(desired_heading - current_pose[2]))
-        V_angular = eta * heading_error  # Proportional control with damping
+                                 np.cos(desired_heading - current_pose[2]))
+        V_angular = eta * heading_error
 
     V_angular = np.clip(V_angular, -max_angular_vel, max_angular_vel)
 
-    # Local minima escape (random perturbation if stuck)
-    if np.linalg.norm(V) < 0.01 and d > d_stop:  # Low velocity, not at goal
-        V_angular += np.random.uniform(-0.2, 0.2)  # Small random turn
-        V_linear = 0.2  # Small forward push
-
-    if verbose:
-        print(f"Linear velocity: {V_linear}, Angular velocity: {V_angular}")
-        print(f"Attractive: {attractive}, Repulsive: {repulsive}")
-        print(f"Distance to goal: {d}, Min distance to obstacle: {np.min(distances)}")
+    # Local minima escape
+    if np.linalg.norm(V) < 0.01 and d > d_stop:
+        V_angular += np.random.uniform(-0.2, 0.2)
+        V_linear = 0.2
 
     if debug_window is not None:
         debug_window.update_components({
@@ -124,7 +107,6 @@ def potential_field_control(lidar, current_pose, goal_pose, verbose=False, debug
 
     command = {"forward": V_linear, "rotation": V_angular}
     return command
-
 
 def potential_field_control_w_clustering(lidar, current_pose, goal_pose, verbose=False, debug_window=None):
 
@@ -226,100 +208,61 @@ def potential_field_control_w_clustering(lidar, current_pose, goal_pose, verbose
 
 
 def dynamic_window_control(lidar, current_pose, goal_pose, current_v, current_w, max_v=0.95, max_w=1.0, 
-                          acc_v=0.5, acc_w=1.047, dt=0.25, alpha=0.8, beta=0.1, gamma=0.1, verbose=False):
+                          acc_v=0.5, acc_w=1.047, dt=0.25, alpha=0.8, beta=0.1, gamma=0.1, verbose=False, debug_window=None):
     """
-    Implements the Dynamic Window Approach (DWA) for collision avoidance, as described in:
-    Fox, D., Burgard, W., & Thrun, S. (1997). "The Dynamic Window Approach to Collision Avoidance."
-    IEEE Robotics & Automation Magazine, March 1997.
-    
-    This method selects optimal translational and rotational velocities by:
-    1. Defining a search space of velocities based on the robot's dynamics.
-    2. Restricting to admissible velocities (safe stopping) and the dynamic window (reachable velocities).
-    3. Maximizing an objective function balancing goal heading, obstacle clearance, and speed.
-    
-    Args:
-        lidar: placebot object with lidar data
-        current_pose: [x, y, theta] nparray, current pose in odometry frame (m, m, rad)
-        goal_pose: [x, y, theta] nparray, target pose in odometry frame (m, m, rad)
-        max_v: float, maximum translational velocity (m/s), default 0.95 as per paper
-        max_w: float, maximum rotational velocity (rad/s), default 1.0 (~57 deg/s)
-        acc_v: float, maximum translational acceleration (m/s^2), default 0.5 as per paper
-        acc_w: float, maximum rotational acceleration (rad/s^2), default 1.047 (~60 deg/s^2)
-        dt: float, time interval for velocity updates (s), default 0.25 as per paper
-        alpha: float, weight for heading in objective function, default 0.8 as per paper
-        beta: float, weight for obstacle clearance, default 0.1 as per paper
-        gamma: float, weight for velocity, default 0.1 as per paper
-        verbose: bool, whether to print debug information
-    
-    Returns:
-        command_dict: {"forward": v, "rotation": w}, where v is linear velocity (m/s) and w is angular velocity (rad/s)
+    Implements the Dynamic Window Approach (DWA) for collision avoidance.
+    Based on: Fox, D., Burgard, W., & Thrun, S. (1997). "The Dynamic Window Approach to Collision Avoidance."
     """
+    # Velocity space discretization
+    v_samples = np.linspace(0, max_v, 20)
+    w_samples = np.linspace(-max_w, max_w, 20)
 
-    # Step 1: Define the search space
-    # Discretize the velocity space (v, w)
-    v_samples = np.linspace(0, max_v, 20)  # 0 to max_v
-    w_samples = np.linspace(-max_w, max_w, 20)  # -max_w to max_w
-
-    # Step 2: Restrict to dynamic window (reachable velocities)
+    # Dynamic window constraints
     v_range = [max(0, current_v - acc_v * dt), min(max_v, current_v + acc_v * dt)]
     w_range = [max(-max_w, current_w - acc_w * dt), min(max_w, current_w + acc_w * dt)]
 
-    # Step 3: Get lidar data for obstacle detection
     distances = lidar.get_sensor_values()
     angles = lidar.get_ray_angles()
-
-    # Validate lidar data
     distances = np.array(distances)
-    distances = np.where(distances <= 0, np.inf, distances) 
-
-    if verbose:
-        print(f"Dynamic window: v_range={v_range}, w_range={w_range}")
-        print(f"Min lidar distance: {np.min(distances)}")
+    distances = np.where(distances <= 0, np.inf, distances)
 
     def compute_objective(v, w):
-        """Internal function to compute the objective function for a velocity pair (v, w)."""
-        # Predict the trajectory (circular arc) over the time interval dt
-        if abs(w) < 1e-3:  # Treat very small w as straight line to avoid division by zero
-            # Straight line
+        # Predict trajectory
+        if abs(w) < 1e-3:
             x_pred = current_pose[0] + v * np.cos(current_pose[2]) * dt
             y_pred = current_pose[1] + v * np.sin(current_pose[2]) * dt
             theta_pred = current_pose[2]
         else:
-            # Circular arc
-            R = v / w  # Radius of curvature
-            x_c = current_pose[0] - R * np.sin(current_pose[2])  # Center of circle
+            R = v / w
+            x_c = current_pose[0] - R * np.sin(current_pose[2])
             y_c = current_pose[1] + R * np.cos(current_pose[2])
             theta_pred = current_pose[2] + w * dt
             x_pred = x_c + R * np.sin(theta_pred)
             y_pred = y_c - R * np.cos(theta_pred)
 
-        # Heading: Alignment with goal
+        # Heading alignment score
         goal_vec = goal_pose[:2] - np.array([x_pred, y_pred])
         goal_angle = np.arctan2(goal_vec[1], goal_vec[0])
-        heading = 180 - np.abs(np.degrees(goal_angle - theta_pred) % 360 - 180)  # 180 is best, 0 is worst
-        heading = heading / 180.0  # Normalize to [0, 1]
+        heading = 180 - np.abs(np.degrees(goal_angle - theta_pred) % 360 - 180)
+        heading = heading / 180.0
 
-        # Distance to closest obstacle
+        # Obstacle clearance score
         dist = float('inf')
         for d, angle in zip(distances, angles):
-            if np.isinf(d):  # Skip infinite distances
+            if np.isinf(d):
                 continue
-            # Obstacle position in world coordinates
             obs_x = current_pose[0] + d * np.cos(angle + current_pose[2])
             obs_y = current_pose[1] + d * np.sin(angle + current_pose[2])
-            # Distance from obstacle to trajectory
+            
             if abs(w) < 1e-3:
-                # Straight line: closest point on line
                 t = ((obs_x - current_pose[0]) * np.cos(current_pose[2]) +
                      (obs_y - current_pose[1]) * np.sin(current_pose[2])) / (v + 1e-6)
                 t = np.clip(t, 0, dt)
                 closest_x = current_pose[0] + v * t * np.cos(current_pose[2])
                 closest_y = current_pose[1] + v * t * np.sin(current_pose[2])
             else:
-                # Circular arc: distance to circle center
                 dist_to_center = np.sqrt((obs_x - x_c)**2 + (obs_y - y_c)**2)
                 closest_dist = abs(dist_to_center - abs(R))
-                # Check if the obstacle is within the arc's angular range
                 obs_angle = np.arctan2(obs_y - y_c, obs_x - x_c)
                 start_angle = current_pose[2] - np.pi/2 if w > 0 else current_pose[2] + np.pi/2
                 end_angle = theta_pred - np.pi/2 if w > 0 else theta_pred + np.pi/2
@@ -330,29 +273,20 @@ def dynamic_window_control(lidar, current_pose, goal_pose, current_v, current_w,
             d_traj = np.sqrt((obs_x - closest_x)**2 + (obs_y - closest_y)**2)
             dist = min(dist, d_traj)
 
-        # Admissible velocity check: can the robot stop before hitting the obstacle?
-        # Add a minimum distance threshold to avoid overly restrictive stopping conditions
-        dist = max(dist, 0.1)  # Minimum distance of 0.1m to prevent zero stopping velocity
+        # Safety check
+        dist = max(dist, 0.1)
         v_stop = np.sqrt(2 * dist * acc_v) if dist > 0 else 0
         w_stop = np.sqrt(2 * dist * acc_w) if dist > 0 else 0
 
-        if verbose:
-            print(f"v={v:.3f}, w={w:.3f}, dist={dist:.3f}, v_stop={v_stop:.3f}, w_stop={w_stop:.3f}")
-
         if v > v_stop or abs(w) > w_stop:
-            return -float('inf')  # Not admissible
+            return -float('inf')
 
-        # Normalize distance (assume max distance is 5m for normalization)
         dist_norm = min(dist / 5.0, 1.0)
-
-        # Velocity: Prefer higher translational speed
         vel_norm = v / max_v
-
-        # Objective function: weighted sum
         score = alpha * heading + beta * dist_norm + gamma * vel_norm
         return score
 
-    # Step 4: Search for the best velocity in the dynamic window
+    # Find optimal velocity
     best_score = -float('inf')
     best_v, best_w = 0.0, 0.0
 
@@ -367,9 +301,18 @@ def dynamic_window_control(lidar, current_pose, goal_pose, current_v, current_w,
                 best_score = score
                 best_v, best_w = v, w
 
-    if verbose:
-        print(f"Best score: {best_score}, Best v: {best_v}, Best w: {best_w}")
-
-    # Step 5: Return the command
     command = {"forward": best_v, "rotation": best_w}
+
+    if debug_window is not None:
+        goal_vec = goal_pose[:2] - current_pose[:2]
+        attractive_vel = np.linalg.norm(goal_vec) * alpha
+        min_dist = np.min(distances)
+        repulsive_vel = beta * (1.0 - min(min_dist / 5.0, 1.0))
+        
+        debug_window.update_components({
+            "attractive_vel": attractive_vel,
+            "repulsive_vel": repulsive_vel,
+            "d_obs": min_dist
+        })
+
     return command

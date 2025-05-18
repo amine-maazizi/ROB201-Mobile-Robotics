@@ -145,7 +145,7 @@ class TinySlam:
                 mu = best_odom_pose_ref.copy()
                 sigma = variance
                 elite_fraction = 0.1
-                for _ in range(N // 10):  # Run for fewer iterations with population
+                for _ in range(N // 10): 
                     population = np.random.normal(mu, sigma, (10, 3))
                     scores = np.array([
                         self._score(lidar, self.get_corrected_pose(raw_odom_pose, pose))
@@ -154,7 +154,7 @@ class TinySlam:
                     elite_idx = np.argsort(scores)[-int(10 * elite_fraction):]
                     elite_poses = population[elite_idx]
                     mu = np.mean(elite_poses, axis=0)
-                    sigma = np.std(elite_poses, axis=0).mean() + 1e-3  # Add small epsilon
+                    sigma = np.std(elite_poses, axis=0).mean() + 1e-3  
                     if scores[elite_idx[-1]] > best_score:
                         best_score = scores[elite_idx[-1]]
                         best_odom_pose_ref = population[elite_idx[-1]].copy()
@@ -174,10 +174,8 @@ class TinySlam:
             else:
                 raise ValueError("Unknown localisation method")
 
-        # Run the selected optimisation method
         run_optimisation(localisation_method)
 
-        # Update odometry reference if score exceeds threshold
         if best_score > self.score_threshold:
             self.odom_pose_ref = best_odom_pose_ref
 
@@ -200,16 +198,13 @@ class TinySlam:
             return x_points, y_points
         
         if method == "regular":
-            # Simple regular sampling - take every n-th point
             indices = np.arange(0, len(x_points), stride)
             return x_points[indices], y_points[indices]
         
         elif method == "adaptive":
             if min_distance is None:
-                # Default to grid cell size if not specified
                 min_distance = self.grid.resolution
                 
-            # Calculate cell indices for all points
             map_points = self.grid.conv_world_to_map(x_points, y_points)
             cell_x, cell_y = np.floor(map_points[0]).astype(int), np.floor(map_points[1]).astype(int)
             
@@ -236,13 +231,10 @@ class TinySlam:
         """
         import numpy as np
 
-        # Get the corrected pose
         x0, y0, _ = pose
         
-        # Convert lidar measurements to world coordinates
         lidar_values, lidar_angles = lidar.get_sensor_values(), lidar.get_ray_angles()
         
-        # Filter for valid range values
         MAX_RANGE = lidar.max_range
         valid_indices = lidar_values < MAX_RANGE
         lidar_values = lidar_values[valid_indices]
@@ -252,7 +244,6 @@ class TinySlam:
         detected_points = TinySlam.pol_to_cart2(lidar_values, lidar_angles, pose)
         x_world, y_world = detected_points[0], detected_points[1]
         
-        # Apply point reduction if requested
         if point_reduction != "none":
             x_world, y_world = self.filter_points(
                 x_world, y_world, 
@@ -260,7 +251,6 @@ class TinySlam:
                 stride=stride, 
                 min_distance=min_distance
             )
-            # Reconstitute detected_points after filtering
             detected_points = np.vstack([x_world, y_world])
         
         def get_probabilities(model, dist, max_dist, is_occupied):
@@ -271,11 +261,11 @@ class TinySlam:
                 factor = 1 - dist / max_dist if not is_occupied else dist / max_dist
                 return (3.98 if is_occupied else -1.99) * max(0.1, factor)
             elif model == "gaussian":
-                sigma = 10.0  # Standard deviation for Gaussian
+                sigma = 10.0  
                 prob = np.exp(-0.5 * (dist / sigma) ** 2)
                 return (3.98 if is_occupied else -1.99) * prob
             elif model == "noisy":
-                noise = np.random.normal(0, 0.2)  # Small Gaussian noise
+                noise = np.random.normal(0, 0.2)  
                 return (3.98 if is_occupied else -1.99) + noise
             else:
                 raise ValueError("Unknown sensor model")
@@ -289,19 +279,16 @@ class TinySlam:
             if y0 != y:
                 target_y += (PADDING) if y0 > y else (-PADDING)
 
-            # Update probabilities along the line (free space)
             self.grid.add_value_along_line(
                 x0, y0, target_x, target_y, 
                 get_probabilities(sensor_model, 0, max_range, is_occupied=False)
             )
 
-        # Update probabilities at detected points (occupied)
         self.grid.add_map_points(
             x_world, y_world, 
             get_probabilities(sensor_model, 0, max_range, is_occupied=True)
         )
         
-        # Clip occupancy map to prevent extreme values
         self.grid.occupancy_map = np.clip(self.grid.occupancy_map, -40, 40)
 
     @staticmethod

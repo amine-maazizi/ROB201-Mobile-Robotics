@@ -48,7 +48,7 @@ class MyRobotSlam(RobotAbstract):
         # TP2
         self.robot_pose_odom = np.array([0, 0, 0])  # Initialize with full pose in odom frame
         self.initial_robot_position = np.array(robot_position)  # World initial position for display
-        self.goal_odom = np.array([-400, -50, 0])  # Goal in odom frame
+        self.goal_odom = np.array([-500, -50, 0])  # Goal in odom frame
         
         # TP4
         self.iteration = 0
@@ -56,7 +56,7 @@ class MyRobotSlam(RobotAbstract):
         # TP5
         self.path = []
         self.path_index = 0
-        self.exploration_iterations = 1000
+        self.exploration_iterations = 750
         self.path_following = False 
 
         # Debug window
@@ -213,8 +213,11 @@ class MyRobotSlam(RobotAbstract):
         if self.path:
             traj = np.array([[p[0] for p in self.path], [p[1] for p in self.path]])
             self.tiny_slam.grid.display_cv(corrected_pose, goal=goal_pose_odom[:2], traj=traj)
+            
+            # Create path string for status message
+            path_str = " -> ".join([f"({p[0]:.1f}, {p[1]:.1f})" for p in self.path])
             self.debug_window.add_status_message(
-                f"Path planned to origin: {len(self.path)} waypoints",
+                f"Path planned: {path_str}",
                 self.debug_window.success_color
             )
             return True
@@ -228,7 +231,7 @@ class MyRobotSlam(RobotAbstract):
 
     def path_following_control(self, corrected_pose):
         """
-        Follow the path using potential field control.
+        Follow the path using a simple local controller.
         All poses and waypoints are in odom frame.
         """
         if not self.path or self.path_index >= len(self.path):
@@ -240,6 +243,12 @@ class MyRobotSlam(RobotAbstract):
 
         next_waypoint = self.path[self.path_index]
         dist_to_waypoint = np.linalg.norm(corrected_pose[:2] - next_waypoint[:2])
+        
+        # Debug info for waypoint tracking
+        self.debug_window.add_status_message(
+            f"Current waypoint {self.path_index}/{len(self.path)}: ({next_waypoint[0]:.1f}, {next_waypoint[1]:.1f}), Distance: {dist_to_waypoint:.1f}",
+            self.debug_window.info_color
+        )
         
         if dist_to_waypoint < 20:
             self.path_index += 1
@@ -255,16 +264,34 @@ class MyRobotSlam(RobotAbstract):
                 )
                 return {"forward": 0, "rotation": 0}
 
-        # Create waypoint pose with correct orientation for potential field control
-        waypoint_pose_odom = np.array([next_waypoint[0], next_waypoint[1], corrected_pose[2]])
+        # Calculate angle to next waypoint using atan2 for proper quadrant handling
+        dx = next_waypoint[0] - corrected_pose[0]
+        dy = next_waypoint[1] - corrected_pose[1]
+        target_angle = np.arctan2(dy, dx)
         
-        # Both corrected_pose and waypoint_pose_odom are in odom frame
-        command = potential_field_control(
-            self.lidar(),
-            corrected_pose,
-            waypoint_pose_odom,
-            debug_window=self.debug_window
-        )
+        # Normalize angle difference to [-pi, pi] to prevent spinning
+        angle_diff = target_angle - corrected_pose[2]
+        angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
+        
+        # Proportional control gains
+        K_angle = 1.0  # Angular control gain
+        K_dist = 0.5   # Distance control gain
+        
+        rotation = K_angle * angle_diff
+        forward = K_dist * dist_to_waypoint
+        
+        # Speed limits for safety
+        max_forward = 0.5
+        max_rotation = 1.0
+        
+        # Slow down when making large turns to prevent overshooting
+        if abs(angle_diff) > np.pi/4:
+            forward *= 0.5
+        
+        forward = np.clip(forward, -max_forward, max_forward)
+        rotation = np.clip(rotation, -max_rotation, max_rotation)
+        
+        command = {"forward": forward, "rotation": rotation}
         return command
 
     def control_tp5(self):
@@ -314,6 +341,13 @@ class MyRobotSlam(RobotAbstract):
         
         attractive_vel = float(self.debug_window.labels["attractive_vel"].cget("text"))
         repulsive_vel = float(self.debug_window.labels["repulsive_vel"].cget("text"))
+        
+        # Calculate distance to goal/waypoint
+        if self.path_following and self.path and self.path_index < len(self.path):
+            dist_to_waypoint = np.linalg.norm(corrected_pose[:2] - self.path[self.path_index][:2])
+            self.debug_window.update_components({
+                "distance": dist_to_waypoint  # Changed to use the dedicated distance label
+            })
         
         self.debug_window.update(
             position=corrected_pose[:2],
