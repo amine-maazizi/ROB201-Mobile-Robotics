@@ -31,7 +31,6 @@ def reactive_obst_avoid(lidar, angle, target_angle, is_rotating):
                "rotation": rotation_speed}
     
     return command
-import numpy as np
 
 def potential_field_control(lidar, current_pose, goal_pose, verbose=False, debug_window=None):
     """
@@ -138,12 +137,14 @@ def potential_field_control_w_clustering(lidar, current_pose, goal_pose, verbose
     debug_window : DebugWindow, optional, for live updates
     Returns: command_dict
     """
-    # Parameters
+
     K_goal = 0.8  # Attractive gain
-    K_obs = 30.0  # Repulsive gain (reduced for smoother avoidance)
-    d_safe = 30   # Safe distance (slightly reduced)
-    d_transition = 40  # Distance to switch to quadratic potential
-    d_stop = 20    # Stopping distance
+    K_obs = 2.0  # Increased repulsive gain for stronger avoidance
+    d_safe = 25   # Reduced safe distance for earlier reaction
+    d_transition = 50  # Increased for smoother transition
+    d_stop = 10   # Tighter stopping distance
+
+
 
     cluster_eps = 10  # Distance max pour clustering (en unités de distance LIDAR)
     min_samples = 3   # Nombre min de points pour un cluster
@@ -224,7 +225,7 @@ def potential_field_control_w_clustering(lidar, current_pose, goal_pose, verbose
 
 
 
-def dynamic_window_control(lidar, current_pose, goal_pose, max_v=0.95, max_w=1.0, 
+def dynamic_window_control(lidar, current_pose, goal_pose, current_v, current_w, max_v=0.95, max_w=1.0, 
                           acc_v=0.5, acc_w=1.047, dt=0.25, alpha=0.8, beta=0.1, gamma=0.1, verbose=False):
     """
     Implements the Dynamic Window Approach (DWA) for collision avoidance, as described in:
@@ -253,10 +254,6 @@ def dynamic_window_control(lidar, current_pose, goal_pose, max_v=0.95, max_w=1.0
     Returns:
         command_dict: {"forward": v, "rotation": w}, where v is linear velocity (m/s) and w is angular velocity (rad/s)
     """
-    # Current velocity (assumed measurable, e.g., from wheel encoders)
-    # For simplicity, assume starting from rest if not provided; in practice, this should be updated
-    current_v = 0.0
-    current_w = 0.0
 
     # Step 1: Define the search space
     # Discretize the velocity space (v, w)
@@ -273,7 +270,7 @@ def dynamic_window_control(lidar, current_pose, goal_pose, max_v=0.95, max_w=1.0
 
     # Validate lidar data
     distances = np.array(distances)
-    distances = np.where(distances <= 0, np.inf, distances)  # Replace invalid distances with infinity
+    distances = np.where(distances <= 0, np.inf, distances) 
 
     if verbose:
         print(f"Dynamic window: v_range={v_range}, w_range={w_range}")

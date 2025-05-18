@@ -56,7 +56,7 @@ class MyRobotSlam(RobotAbstract):
         # TP5
         self.path = []
         self.path_index = 0
-        self.exploration_iterations = 700
+        self.exploration_iterations = 1000
         self.path_following = False 
 
         # Debug window
@@ -165,7 +165,7 @@ class MyRobotSlam(RobotAbstract):
         Control function for TP4 with SLAM and localization
         """
         raw_odom = self.odometer_values()
-        score = self.tiny_slam.localise(self.lidar(), raw_odom, localisation_method="cem")
+        score = self.tiny_slam.localise(self.lidar(), raw_odom, localisation_method="cma-es")
         corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
         
         if score > self.tiny_slam.score_threshold:
@@ -290,6 +290,9 @@ class MyRobotSlam(RobotAbstract):
         if self.iteration <= self.exploration_iterations:
             # During exploration phase
             command = potential_field_control(self.lidar(), corrected_pose, self.goal_odom, debug_window=self.debug_window)
+            # command = dynamic_window_control(self.lidar(), corrected_pose, self.goal_odom,
+            #                                  self.last_command["forward"],
+            #                                  self.last_command["rotation"])
             self.path_following = False
         else:
             # Path following phase
@@ -329,7 +332,7 @@ class MyRobotSlam(RobotAbstract):
         )
         
         # Display updated map
-        self.tiny_slam.grid.display_cv(corrected_pose)
+        # self.tiny_slam.grid.display_cv(corrected_pose)
         
         self.last_command = command
         return command

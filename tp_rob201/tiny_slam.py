@@ -5,9 +5,8 @@ import numpy as np
 import cma
 from occupancy_grid import OccupancyGrid
 
-
 class TinySlam:
-    """Simple occupancy grid SLAM"""
+    """Simple occupancy grid SLAM with optimized point reduction"""
 
     def __init__(self, occupancy_grid: OccupancyGrid):
         self.grid = occupancy_grid
@@ -107,10 +106,9 @@ class TinySlam:
                                   y0 + x * np.sin(theta0) + y * np.cos(theta0),
                                   theta0 + theta])
         
-
         return corrected_pose
 
-    def localise(self, lidar, raw_odom_pose, N=200, variance=0.2, localisation_method="simple"):
+    def localise(self, lidar, raw_odom_pose, N=100, variance=0.3, localisation_method="simple"):
         """
         Compute the robot position wrt the map, and updates the odometry reference
         lidar : placebot object with lidar data
@@ -185,12 +183,56 @@ class TinySlam:
 
         return best_score
     
-    def update_map(self, lidar, pose, sensor_model="simple"):
+    def filter_points(self, x_points, y_points, method="regular", stride=2, min_distance=None):
+        """
+        Filter lidar points to reduce computation
+        
+        x_points, y_points: coordinates of detected points
+        method: "regular" to keep 1 point every stride points
+                "adaptive" to keep points with minimum distance between them
+        stride: for regular method, keep 1 point every stride points
+        min_distance: for adaptive method, minimum distance between points (map units)
+        
+        Returns: filtered x and y coordinates
+        """
+        
+        if len(x_points) == 0:
+            return x_points, y_points
+        
+        if method == "regular":
+            # Simple regular sampling - take every n-th point
+            indices = np.arange(0, len(x_points), stride)
+            return x_points[indices], y_points[indices]
+        
+        elif method == "adaptive":
+            if min_distance is None:
+                # Default to grid cell size if not specified
+                min_distance = self.grid.resolution
+                
+            # Calculate cell indices for all points
+            map_points = self.grid.conv_world_to_map(x_points, y_points)
+            cell_x, cell_y = np.floor(map_points[0]).astype(int), np.floor(map_points[1]).astype(int)
+            
+            # Create a unique cell identifier for each point
+            cell_ids = cell_x * self.grid.y_max_map + cell_y
+            
+            # Get unique cell IDs and their first occurrences
+            unique_cells, indices = np.unique(cell_ids, return_index=True)
+            
+            return x_points[indices], y_points[indices]
+        
+        else:
+            raise ValueError("Method must be 'regular' or 'adaptive'")
+    
+    def update_map(self, lidar, pose, sensor_model="simple", point_reduction="none", stride=2, min_distance=None):
         """
         Bayesian map update with new observation
         lidar : placebot object with lidar data
         pose : [x, y, theta] nparray, corrected pose in world coordinates
         sensor_model : str, sensor model to use ("simple", "intermediate", "gaussian", "noisy")
+        point_reduction: str, method to reduce points ("none", "regular", "adaptive")
+        stride: int, for regular reduction, keep 1 point every stride points
+        min_distance: float, for adaptive reduction, minimum distance between points
         """
         import numpy as np
 
@@ -198,7 +240,28 @@ class TinySlam:
         x0, y0, _ = pose
         
         # Convert lidar measurements to world coordinates
-        detected_points = TinySlam.pol_to_cart2(lidar.get_sensor_values(), lidar.get_ray_angles(), pose)
+        lidar_values, lidar_angles = lidar.get_sensor_values(), lidar.get_ray_angles()
+        
+        # Filter for valid range values
+        MAX_RANGE = lidar.max_range
+        valid_indices = lidar_values < MAX_RANGE
+        lidar_values = lidar_values[valid_indices]
+        lidar_angles = lidar_angles[valid_indices]
+        
+        # Convert to world coordinates
+        detected_points = TinySlam.pol_to_cart2(lidar_values, lidar_angles, pose)
+        x_world, y_world = detected_points[0], detected_points[1]
+        
+        # Apply point reduction if requested
+        if point_reduction != "none":
+            x_world, y_world = self.filter_points(
+                x_world, y_world, 
+                method=point_reduction, 
+                stride=stride, 
+                min_distance=min_distance
+            )
+            # Reconstitute detected_points after filtering
+            detected_points = np.vstack([x_world, y_world])
         
         def get_probabilities(model, dist, max_dist, is_occupied):
             """Calculate probability updates based on sensor model."""
@@ -219,7 +282,7 @@ class TinySlam:
 
         PADDING = 20
         max_range = lidar.max_range
-        for x, y in zip(*detected_points):
+        for x, y in zip(x_world, y_world):
             target_x, target_y = x, y
             if x0 != x:
                 target_x += (PADDING) if x0 > x else (-PADDING)
@@ -234,7 +297,7 @@ class TinySlam:
 
         # Update probabilities at detected points (occupied)
         self.grid.add_map_points(
-            detected_points[0], detected_points[1], 
+            x_world, y_world, 
             get_probabilities(sensor_model, 0, max_range, is_occupied=True)
         )
         
@@ -247,5 +310,3 @@ class TinySlam:
         pts_x = ranges * np.cos(ray_angles + theta) + x
         pts_y = ranges * np.sin(ray_angles + theta) + y
         return np.vstack([pts_x, pts_y]) 
-
-
