@@ -17,3 +17,4 @@ At the end of the course, the complete repository will be submitted as a zip fil
 ## Contact
 
 For questions about the code or *Place-Bot*, contact the instructor at: emmanuel.battesti@ensta-paris.fr.
+

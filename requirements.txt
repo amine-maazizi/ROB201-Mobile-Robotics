@@ -2,8 +2,9 @@ matplotlib
 #pyqt5
 numpy==1.24.3
 opencv-contrib-python>=4.7.0.72
+scikit-learn
+cma
 
 place-bot @ git+https://github.com/emmanuel-battesti/place-bot.git@main#egg=place-bot
 # -e /home/battesti/projetRobotMobile/place-bot
 # place-bot
-
