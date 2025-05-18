@@ -1,16 +1,13 @@
 import numpy as np
-
 from place_bot.entities.robot_abstract import RobotAbstract
 from place_bot.entities.odometer import OdometerParams
 from place_bot.entities.lidar import LidarParams
-
 from tiny_slam import TinySlam
 from debug_window import DebugWindow
-
-from control import potential_field_control, reactive_obst_avoid, potential_field_control_w_clustering, dynamic_window_control
+from control import potential_field_control
 from occupancy_grid import OccupancyGrid
 from planner import Planner
-
+from mpi4py import MPI  # Import MPI4py for parallel processing
 
 class MyRobotSlam(RobotAbstract):
     """A robot controller including SLAM, path planning and path following"""
@@ -18,25 +15,52 @@ class MyRobotSlam(RobotAbstract):
     def __init__(self,
                  lidar_params: LidarParams = LidarParams(),
                  odometer_params: OdometerParams = OdometerParams()):
-        # Passing parameter to parent class
         super().__init__(should_display_lidar=False,
                          lidar_params=lidar_params,
                          odometer_params=odometer_params)
 
+        # MPI initialization
+        self.comm = MPI.COMM_WORLD
+        self.rank = self.comm.Get_rank()
+        self.size = self.comm.Get_size()
+
+        if self.size != 2:
+            if self.rank == 0:
+                print("Error: This implementation requires exactly 2 MPI processes (1 for robot, 1 for SLAM).")
+            MPI.Finalize()
+            exit(1)
+
         # Step counter to deal with init and display
         self.counter = 0
 
-        # Init SLAM object
+        # Common parameters for all processes
         size_area = (1400, 1000)
         robot_position = (439.0, 195)
-        self.occupancy_grid = OccupancyGrid(x_min=-(size_area[0] / 2 + robot_position[0]),
-                                            x_max=size_area[0] / 2 - robot_position[0],
-                                            y_min=-(size_area[1] / 2 + robot_position[1]),
-                                            y_max=size_area[1] / 2 - robot_position[1],
-                                            resolution=2)
 
-        self.tiny_slam = TinySlam(self.occupancy_grid)
-        self.planner = Planner(self.occupancy_grid)
+        # Init SLAM object (only in SLAM process, rank 1)
+        if self.rank == 1:
+            self.occupancy_grid = OccupancyGrid(x_min=-(size_area[0] / 2 + robot_position[0]),
+                                                x_max=size_area[0] / 2 - robot_position[0],
+                                                y_min=-(size_area[1] / 2 + robot_position[1]),
+                                                y_max=size_area[1] / 2 - robot_position[1],
+                                                resolution=2)
+            self.tiny_slam = TinySlam(self.occupancy_grid)
+            # Start SLAM process
+            self.run_slam_process()
+            return  # Exit initialization for SLAM process
+        else:
+            self.occupancy_grid = None
+            self.tiny_slam = None
+
+        # Common attributes
+        if self.rank == 0:
+            self.planner = Planner(None)  # Planner will use map data from SLAM process if needed
+            self.debug_window = DebugWindow()
+            self.last_command = {"forward": 0.0, "rotation": 0.0}
+        else:
+            self.planner = None
+            self.debug_window = None
+            self.last_command = None
 
         # Storage for pose after localization
         self.corrected_pose = np.array([0, 0, 0])
@@ -46,10 +70,10 @@ class MyRobotSlam(RobotAbstract):
         self.is_rotating = False
 
         # TP2
-        self.robot_pose_odom = np.array([0, 0, 0])  # Initialize with full pose in odom frame
-        self.initial_robot_position = np.array(robot_position)  # World initial position for display
-        self.goal_odom = np.array([-500, -50, 0])  # Goal in odom frame
-        
+        self.robot_pose_odom = np.array([0, 0, 0])
+        self.initial_robot_position = np.array(robot_position)
+        self.goal_odom = np.array([-500, -50, 0])
+
         # TP4
         self.iteration = 0
 
@@ -57,18 +81,53 @@ class MyRobotSlam(RobotAbstract):
         self.path = []
         self.path_index = 0
         self.exploration_iterations = 750
-        self.path_following = False 
+        self.path_following = False
 
-        # Debug window
-        self.debug_window = DebugWindow()
-        self.last_command = {"forward": 0.0, "rotation": 0.0}
+    def run_slam_process(self):
+        """SLAM process (rank 1) that handles localization, map updating, and rendering"""
+        while True:
+            # Receive LIDAR and odometry data from robot process
+            data = self.comm.recv(source=0, tag=0)
+            if data is None:  # Termination signal
+                break
+
+            lidar_data, lidar_angles, max_range, raw_odom = data
+            
+            # Create a simple object with the required attributes
+            class LidarData:
+                def __init__(self, values, angles, max_range):
+                    self.values = values
+                    self.angles = angles
+                    self.max_range = max_range
+                
+                def get_sensor_values(self):
+                    return self.values
+                
+                def get_ray_angles(self):
+                    return self.angles
+
+            lidar = LidarData(lidar_data, lidar_angles, max_range)
+            
+            # Perform localization
+            score = self.tiny_slam.localise(lidar, raw_odom)
+            corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
+
+            # Update map
+            self.tiny_slam.update_map(lidar, corrected_pose)
+
+            # Send back score and corrected pose
+            self.comm.send((score, corrected_pose), dest=0, tag=1)
+
+        # Finalize SLAM process
+        MPI.Finalize()
 
     def control(self):
-        """
-        Main control function executed at each time step
-        """
-        self.debug_window.render()
-        return self.control_tp5()
+        """Main control function executed at each time step"""
+        if self.rank == 1:
+            return {"forward": 0, "rotation": 0}  # SLAM process doesn't control robot
+        else:
+            self.debug_window.render()
+            return self.control_tp5()
 
     def control_tp1(self):
         """
@@ -204,17 +263,14 @@ class MyRobotSlam(RobotAbstract):
         return command
 
     def plan_path(self, start_pose_odom, goal_pose_odom, corrected_pose):
-        """
-        Plan a path from start_pose to goal_pose using the planner and visualize it.
-        All poses are in odom frame.
-        """
+        """Plan a path from start_pose to goal_pose. Map data is managed by SLAM process."""
+        # In a real implementation, the planner would need map data from the SLAM process.
+        # For simplicity, assume planner uses a precomputed map or communicates internally.
         self.path = self.planner.plan(start_pose_odom, goal_pose_odom)
         self.path_index = 0
         if self.path:
             traj = np.array([[p[0] for p in self.path], [p[1] for p in self.path]])
-            self.tiny_slam.grid.display_cv(corrected_pose, goal=goal_pose_odom[:2], traj=traj)
-            
-            # Create path string for status message
+            # Note: Map display is handled by SLAM process
             path_str = " -> ".join([f"({p[0]:.1f}, {p[1]:.1f})" for p in self.path])
             self.debug_window.add_status_message(
                 f"Path planned: {path_str}",
@@ -230,10 +286,7 @@ class MyRobotSlam(RobotAbstract):
             return False
 
     def path_following_control(self, corrected_pose):
-        """
-        Follow the path using a simple local controller.
-        All poses and waypoints are in odom frame.
-        """
+        """Follow the path using a simple local controller."""
         if not self.path or self.path_index >= len(self.path):
             self.debug_window.add_status_message(
                 "No valid path or path completed, stopping",
@@ -244,7 +297,6 @@ class MyRobotSlam(RobotAbstract):
         next_waypoint = self.path[self.path_index]
         dist_to_waypoint = np.linalg.norm(corrected_pose[:2] - next_waypoint[:2])
         
-        # Debug info for waypoint tracking
         self.debug_window.add_status_message(
             f"Current waypoint {self.path_index}/{len(self.path)}: ({next_waypoint[0]:.1f}, {next_waypoint[1]:.1f}), Distance: {dist_to_waypoint:.1f}",
             self.debug_window.info_color
@@ -264,69 +316,61 @@ class MyRobotSlam(RobotAbstract):
                 )
                 return {"forward": 0, "rotation": 0}
 
-        # Calculate angle to next waypoint using atan2 for proper quadrant handling
         dx = next_waypoint[0] - corrected_pose[0]
         dy = next_waypoint[1] - corrected_pose[1]
         target_angle = np.arctan2(dy, dx)
-        
-        # Normalize angle difference to [-pi, pi] to prevent spinning
         angle_diff = target_angle - corrected_pose[2]
         angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
         
-        # Proportional control gains
-        K_angle = 1.0  # Angular control gain
-        K_dist = 0.5   # Distance control gain
-        
+        K_angle = 1.0
+        K_dist = 0.5
         rotation = K_angle * angle_diff
         forward = K_dist * dist_to_waypoint
         
-        # Speed limits for safety
-        max_forward = 0.5
-        max_rotation = 1.0
-        
-        # Slow down when making large turns to prevent overshooting
         if abs(angle_diff) > np.pi/4:
             forward *= 0.5
         
+        max_forward = 0.5
+        max_rotation = 1.0
         forward = np.clip(forward, -max_forward, max_forward)
         rotation = np.clip(rotation, -max_rotation, max_rotation)
         
-        command = {"forward": forward, "rotation": rotation}
-        return command
+        return {"forward": forward, "rotation": rotation}
 
     def control_tp5(self):
-        """
-        Control function for TP5 with SLAM, planning, and path following.
-        All poses and waypoints are in odom frame.
-        """
+        """Control function for TP5 with SLAM in a separate MPI process."""
         raw_odom = self.odometer_values()
-        score = self.tiny_slam.localise(self.lidar(), raw_odom)
-        corrected_pose = self.tiny_slam.get_corrected_pose(raw_odom)
+        lidar = self.lidar()
+        
+        # Extract the data we need to send
+        lidar_data = lidar.get_sensor_values()
+        lidar_angles = lidar.get_ray_angles()
+        max_range = lidar.max_range
 
+        # Send LIDAR and odometry data to SLAM process (rank 1)
+        self.comm.send((lidar_data, lidar_angles, max_range, raw_odom), dest=1, tag=0)
+
+        # Receive SLAM results
+        score, corrected_pose = self.comm.recv(source=1, tag=1)
+
+        # Update pose if score is above threshold
         if score > self.tiny_slam.score_threshold:
-            self.robot_pose_odom = corrected_pose.copy()  # Store full pose
+            self.robot_pose_odom = corrected_pose.copy()
             self.debug_window.add_status_message(
                 f"Pose updated: ({raw_odom[0]:.1f}, {raw_odom[1]:.1f}) → ({corrected_pose[0]:.1f}, {corrected_pose[1]:.1f})",
                 self.debug_window.warning_color
             )
 
-        # Update map with corrected pose in odom frame
-        self.tiny_slam.update_map(self.lidar(), corrected_pose)
         self.iteration += 1
 
+        # Control logic (exploration or path following)
         if self.iteration <= self.exploration_iterations:
-            # During exploration phase
-            command = potential_field_control(self.lidar(), corrected_pose, self.goal_odom, debug_window=self.debug_window)
-            # command = dynamic_window_control(self.lidar(), corrected_pose, self.goal_odom,
-            #                                  self.last_command["forward"],
-            #                                  self.last_command["rotation"])
+            command = potential_field_control(lidar, corrected_pose, self.goal_odom, debug_window=self.debug_window)
             self.path_following = False
         else:
-            # Path following phase
             self.path_following = True
             if self.iteration == self.exploration_iterations + 1:
-                # Plan path to origin when we first enter path following mode
-                goal_pose_odom = np.array([0, 0, 0])  # Origin in odom frame
+                goal_pose_odom = np.array([0, 0, 0])
                 if not self.plan_path(corrected_pose, goal_pose_odom, corrected_pose):
                     command = {"forward": 0, "rotation": 0}
                 else:
@@ -342,11 +386,10 @@ class MyRobotSlam(RobotAbstract):
         attractive_vel = float(self.debug_window.labels["attractive_vel"].cget("text"))
         repulsive_vel = float(self.debug_window.labels["repulsive_vel"].cget("text"))
         
-        # Calculate distance to goal/waypoint
         if self.path_following and self.path and self.path_index < len(self.path):
             dist_to_waypoint = np.linalg.norm(corrected_pose[:2] - self.path[self.path_index][:2])
             self.debug_window.update_components({
-                "distance": dist_to_waypoint  # Changed to use the dedicated distance label
+                "distance": dist_to_waypoint
             })
         
         self.debug_window.update(
@@ -356,7 +399,7 @@ class MyRobotSlam(RobotAbstract):
             speed=command["forward"],
             rotation=command["rotation"],
             iteration=self.iteration,
-            max_range=self.lidar().max_range,
+            max_range=max_range,
             mode="Exploring" if not self.path_following else "Path Following",
             attractive_vel=attractive_vel,
             repulsive_vel=repulsive_vel,
@@ -364,9 +407,6 @@ class MyRobotSlam(RobotAbstract):
             position_odom=f"{corrected_pose[0]:.1f}, {corrected_pose[1]:.1f}, {corrected_pose[2]:.1f}",
             position_world=f"{self.initial_robot_position[0]+corrected_pose[0]:.1f}, {self.initial_robot_position[1]+corrected_pose[1]:.1f}, {corrected_pose[2]:.1f}"
         )
-        
-        # Display updated map
-        # self.tiny_slam.grid.display_cv(corrected_pose)
         
         self.last_command = command
         return command
